@@ -189,12 +189,32 @@ public sealed class CaptureBuilderTests
     }
 
     [Fact]
-    public void Build_FallsBackToText_WhenFilesBodyExceedsMaxFormatBytes()
+    public void Build_ReturnsNull_WhenFilesBodyExceedsMaxFormatBytes_EvenWithSmallText()
     {
         CapturedEntry? entry = CaptureBuilder.Build(Snapshot(text: "x", files: new[] { @"C:\long\path\file.txt" }), TenByteLimit, Now);
 
+        Assert.Null(entry);
+    }
+
+    [Fact]
+    public void Build_ReturnsNull_WhenTextExceedsMaxFormatBytes_EvenWithSmallPng()
+    {
+        CapturedEntry? entry = CaptureBuilder.Build(
+            Snapshot(text: "abcdefghijk", formats: new[] { Format(FormatNames.Png, 3) }), TenByteLimit, Now);
+
+        Assert.Null(entry);
+    }
+
+    [Fact]
+    public void Build_PromotesNextFittingImage_WhenPrimaryImageExceedsMaxFormatBytes()
+    {
+        var formats = new[] { Format(FormatNames.Png, 11), Format(FormatNames.DibV5, 4) };
+
+        CapturedEntry? entry = CaptureBuilder.Build(Snapshot(formats: formats), TenByteLimit, Now);
+
         Assert.NotNull(entry);
-        Assert.Equal(EntryKind.Text, entry.Kind);
+        Assert.Equal(EntryKind.Image, entry.Kind);
+        Assert.Equal(new[] { FormatNames.DibV5 }, entry.Formats.Select(f => f.Name));
     }
 
     [Fact]

@@ -12,25 +12,33 @@ public static class CaptureBuilder
         long limit = o.MaxFormatBytes;
         string? sourceApp = string.IsNullOrEmpty(s.SourceExePath) ? null : Path.GetFileName(s.SourceExePath);
 
-        // An item over the limit is skipped rather than failing the whole capture, so a lower-priority
-        // representation of the same copy can still be recorded.
+        // The primary kind is decided first and an oversize primary drops the whole entry (spec 6.1);
+        // falling through to a lower kind would record content the user did not copy as the main item.
         if (s.Files is { Count: > 0 } files)
         {
             string body = string.Join('\n', files);
-            if (Utf8Size(body) <= limit)
+            if (Utf8Size(body) > limit)
             {
-                return new CapturedEntry(EntryKind.Files, body, Array.Empty<ClipFormat>(),
-                    ContentHasher.ForFiles(files), sourceApp, now);
+                return null;
             }
+
+            return new CapturedEntry(EntryKind.Files, body, Array.Empty<ClipFormat>(),
+                ContentHasher.ForFiles(files), sourceApp, now);
         }
 
         string? text = s.Text;
-        if (!string.IsNullOrEmpty(text) && Utf8Size(text) <= limit)
+        if (!string.IsNullOrEmpty(text))
         {
+            if (Utf8Size(text) > limit)
+            {
+                return null;
+            }
+
             return new CapturedEntry(ContentClassifier.ClassifyText(text), text, KeepFormats(s.Formats, limit),
                 ContentHasher.ForText(text), sourceApp, now);
         }
 
+        // Within an image, an oversize format is dropped and the next fitting one becomes primary.
         ClipFormat? image = PickImage(s.Formats, limit);
         if (image is null)
         {

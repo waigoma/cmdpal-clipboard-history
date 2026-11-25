@@ -8,6 +8,19 @@ namespace Waigoma.ClipboardHistory.Store;
 // Every method here is one transaction, and Changed fires only when the call actually changed a row.
 public sealed partial class HistoryStore
 {
+    // Lets the worker process and other writers announce changes that this process did not make itself.
+    public void NotifyChanged() => RaiseChanged();
+
+    // Asks SQLite to give back its page cache. The lock keeps it from running inside another statement.
+    public void ReleaseMemory()
+    {
+        lock (_db.Gate)
+        {
+            using SqliteCommand command = _db.Command("PRAGMA shrink_memory");
+            command.ExecuteNonQuery();
+        }
+    }
+
     public void Touch(long id)
     {
         long now = _clock.GetUtcNow().ToUnixTimeMilliseconds();

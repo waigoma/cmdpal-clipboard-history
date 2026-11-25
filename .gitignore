@@ -10,3 +10,5 @@ TestResults/
 *.msix
 *.log
 .claude/settings.local.json
+
+artifacts/

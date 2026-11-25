@@ -152,15 +152,20 @@ function Set-SecretClipboard {
     $data.SetData('CanIncludeInClipboardHistory', (New-Object System.IO.MemoryStream (, [byte[]]@(0, 0, 0, 0))))
     $data.SetData('CanUploadToCloudClipboard', (New-Object System.IO.MemoryStream (, [byte[]]@(0, 0, 0, 0))))
 
+    # $true renders the formats now: Read-Host blocks this STA thread, so no message pump would serve a delayed render.
     # The clipboard can be locked by another process for a moment, so the write is retried a few times.
     for ($attempt = 1; $attempt -le 5; $attempt++) {
         try {
-            [System.Windows.Forms.Clipboard]::SetDataObject($data, $false)
-            return
+            [System.Windows.Forms.Clipboard]::SetDataObject($data, $true)
+            # Read back the text; a mismatch counts as a failed attempt. The text itself is never printed.
+            if ([System.Windows.Forms.Clipboard]::GetText([System.Windows.Forms.TextDataFormat]::UnicodeText) -ceq $Text) {
+                Write-Output 'Win+V やクリップボード履歴拡張には意図的に表示されないため、Ctrl+V で直接貼り付けてください。'
+                return
+            }
         }
         catch [System.Runtime.InteropServices.ExternalException] {
-            Start-Sleep -Milliseconds 200
         }
+        Start-Sleep -Milliseconds 200
     }
     throw 'クリップボードに書き込めませんでした。'
 }

@@ -1,11 +1,14 @@
-﻿# Builds the extension, signs a copy of the unsigned MSIX with the self-signed certificate (SHA256, no timestamp server,
-# so nothing is sent over the network) and prints the signed MSIX path as the last line. Runs from any current directory
-# and exits non-zero on failure. Trust is not established here; install.ps1 explains what the user must do.
+﻿# Builds the extension, signs a copy of the unsigned MSIX from artifacts\unsigned with the self-signed development certificate
+# (SHA256, no timestamp server, so nothing is sent over the network) and prints the signed MSIX path as the last line.
+# Runs from any current directory and exits non-zero on failure. Trust is not established here; install.ps1 explains what
+# the user must do.
 $ErrorActionPreference = 'Stop'
 
+. (Join-Path $PSScriptRoot 'common.ps1')
+
 $repoRoot = Split-Path -Parent $PSScriptRoot
-$projectDir = Join-Path $repoRoot 'src\ClipboardHistory.Extension'
 $artifacts = Join-Path $repoRoot 'artifacts'
+$unsignedDir = Join-Path $artifacts 'unsigned'
 $buildScript = Join-Path $PSScriptRoot 'build.ps1'
 $certScript = Join-Path $PSScriptRoot 'new-certificate.ps1'
 $exeName = 'ClipboardHistory.Extension.exe'
@@ -13,82 +16,19 @@ $minExeBytes = 5MB
 # Set once the signing copy exists, so the catch block can remove it when a step fails.
 $workPath = $null
 
-Add-Type -AssemblyName System.IO.Compression.FileSystem
-
-# Reads the package version and the size of the app exe from the MSIX (a zip). Returns $null when a part is missing.
-function Read-MsixInfo {
-    param([string]$Path)
-    $zip = [System.IO.Compression.ZipFile]::OpenRead($Path)
-    try {
-        $manifestEntry = $zip.GetEntry('AppxManifest.xml')
-        $exeEntry = $zip.GetEntry($exeName)
-        if ($null -eq $manifestEntry -or $null -eq $exeEntry) {
-            return $null
-        }
-
-        $reader = New-Object System.IO.StreamReader($manifestEntry.Open())
-        try {
-            [xml]$manifest = $reader.ReadToEnd()
-        }
-        finally {
-            $reader.Dispose()
-        }
-
-        return [pscustomobject]@{
-            Version = [string]$manifest.Package.Identity.Version
-            ExeBytes = [long]$exeEntry.Length
-        }
-    }
-    finally {
-        $zip.Dispose()
-    }
-}
-
-# The SDK tools ship as bin\<version>\x64\signtool.exe. The highest version wins, so a newer SDK is preferred.
-function Find-SignTool {
-    $nugetRoot = if ([string]::IsNullOrEmpty($env:NUGET_PACKAGES)) { Join-Path $env:USERPROFILE '.nuget\packages' } else { $env:NUGET_PACKAGES }
-    $candidates = @(
-        (Join-Path $nugetRoot 'microsoft.windows.sdk.buildtools'),
-        (Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin')
-    )
-
-    foreach ($root in $candidates) {
-        if (-not (Test-Path -LiteralPath $root)) {
-            continue
-        }
-
-        $tool = Get-ChildItem -LiteralPath $root -Recurse -Filter 'signtool.exe' -File |
-            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' -and $_.Directory.Parent.Name -match '^\d+(\.\d+){1,3}$' } |
-            Sort-Object -Property @{ Expression = { [version]$_.Directory.Parent.Name } } -Descending |
-            Select-Object -First 1
-        if ($null -ne $tool) {
-            return $tool.FullName
-        }
-    }
-
-    return $null
-}
-
 try {
-    # Taken before the build, so a package left over from an earlier build can be told apart from this one.
-    $buildStarted = Get-Date
     Write-Output 'ビルドしています (Release, x64, Native AOT)...'
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "ビルドに失敗しました (終了コード $LASTEXITCODE)。"
     }
 
-    # Only the Release x64 output or the x64 AppPackages folder counts, so a stale package from another configuration is never signed.
-    $unsigned = Get-ChildItem -LiteralPath $projectDir -Recurse -Filter '*.msix' -File |
-        Where-Object { $_.FullName -match '\\bin\\x64\\Release\\' -or $_.FullName -match '\\AppPackages\\[^\\]*_x64[^\\]*\\[^\\]*\.msix$' } |
-        Sort-Object -Property LastWriteTime -Descending |
-        Select-Object -First 1
-    if ($null -eq $unsigned) {
-        throw 'ビルドの出力に未署名の .msix が見つかりません。'
+    # build.ps1 has just replaced this folder with the MSIX of the build that ran, so exactly one file is expected.
+    $unsignedFiles = @(Get-ChildItem -LiteralPath $unsignedDir -Filter 'ClipboardHistory_*.msix' -File -ErrorAction SilentlyContinue)
+    if ($unsignedFiles.Count -ne 1) {
+        throw ('artifacts\unsigned に署名対象の .msix が 1 つだけありません (現在 {0} 個)。' -f $unsignedFiles.Count)
     }
-    if ($unsigned.LastWriteTime -lt $buildStarted) {
-        throw ('ビルドの出力 {0} がこのビルドより前のものです。ビルドが .msix を作り直さなかったため、署名を中止します。' -f $unsigned.Name)
-    }
+    $unsigned = $unsignedFiles[0]
 
     $unsignedInfo = Read-MsixInfo -Path $unsigned.FullName
     if ($null -eq $unsignedInfo) {

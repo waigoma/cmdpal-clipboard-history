@@ -1,6 +1,8 @@
 ﻿# Installs the signed clipboard history package for the current user. Read-only checks come first: the script does not
 # import certificates, toggle Developer Mode or change any store. When the signing certificate is not trusted it prints
 # the exact elevated command for the user to run and exits 1. Runs from any current directory.
+# Release download: when a ClipboardHistory_*.msix lies next to this script, that folder supplies the package and
+# waigoma.cer. Otherwise the repository's artifacts folder is used (development build).
 param(
     [string]$Msix,
     [switch]$RemoveDevelopment
@@ -11,11 +13,14 @@ $ErrorActionPreference = 'Stop'
 $packageName = 'waigoma.CmdPal.ClipboardHistory'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $repoRoot 'artifacts'
-$certPath = Join-Path $artifacts 'waigoma.cer'
+
+$releaseMode = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'ClipboardHistory_*.msix' -File -ErrorAction SilentlyContinue).Count -gt 0
+$baseDir = if ($releaseMode) { $PSScriptRoot } else { $artifacts }
+$certPath = Join-Path $baseDir 'waigoma.cer'
 
 try {
     if ([string]::IsNullOrEmpty($Msix)) {
-        $newest = Get-ChildItem -LiteralPath $artifacts -Filter 'ClipboardHistory_*.msix' -File -ErrorAction SilentlyContinue |
+        $newest = Get-ChildItem -LiteralPath $baseDir -Filter 'ClipboardHistory_*.msix' -File -ErrorAction SilentlyContinue |
             Sort-Object -Property LastWriteTime -Descending |
             Select-Object -First 1
         if ($null -eq $newest) {
@@ -29,16 +34,22 @@ try {
 
     $signature = Get-AuthenticodeSignature -LiteralPath $msixPath
     if ($null -eq $signature.SignerCertificate) {
+        if ($releaseMode) {
+            throw '.msix が署名されていません。配布物を取得し直してください。'
+        }
         throw '.msix が署名されていません。scripts\package.ps1 で作り直してください。'
     }
     $thumbprint = $signature.SignerCertificate.Thumbprint
 
-    # The .cer in artifacts is the one the user imports, so it must be the certificate that signed this package.
+    # The .cer next to the package is the one the user imports, so it must be the certificate that signed this package.
     $cerThumbprint = $null
     if (Test-Path -LiteralPath $certPath) {
         $cerThumbprint = (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $certPath).Thumbprint
     }
     if ($cerThumbprint -ne $thumbprint) {
+        if ($releaseMode) {
+            throw 'waigoma.cer が .msix の署名証明書と一致しません。配布物を取得し直してください。'
+        }
         throw 'artifacts\waigoma.cer が署名に使われた証明書と一致しません。scripts\new-certificate.ps1 を実行してから scripts\package.ps1 で作り直してください。'
     }
 

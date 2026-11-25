@@ -42,6 +42,13 @@
     <Manifest Include="$(ApplicationManifest)" />
   </ItemGroup>
 
+  <!-- The licence files ship inside the package. Each has a Condition so the build still works before the files exist. -->
+  <ItemGroup>
+    <Content Include="..\..\LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\LICENSE')" />
+    <Content Include="..\..\THIRD-PARTY-NOTICES.md" Link="THIRD-PARTY-NOTICES.md" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\THIRD-PARTY-NOTICES.md')" />
+    <Content Include="..\..\licenses\Apache-2.0.txt" Link="licenses\Apache-2.0.txt" CopyToOutputDirectory="PreserveNewest" Condition="Exists('..\..\licenses\Apache-2.0.txt')" />
+  </ItemGroup>
+
   <!-- The loose layout must contain Assets\ and Public\ (PublicFolder in the manifest). -->
   <ItemGroup>
     <Content Update="Assets\**">

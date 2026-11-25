@@ -407,6 +407,24 @@ public sealed class HistoryStoreMaintenanceTests
         Assert.True(File.Exists(store.Blobs.FullPath(name)));
     }
 
+    [Fact]
+    public void EnforceTotalLimit_SubtractsEachDeletedRowsSize_NotAFixedAmount()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        // Deleting the 200-byte oldest row leaves 150 bytes, which is still over the limit, so one 50-byte row must go too.
+        AddText(store, new string('a', 200), T0 - TimeSpan.FromMinutes(4));
+        AddText(store, new string('b', 50), T0 - TimeSpan.FromMinutes(3));
+        AddText(store, new string('c', 50), T0 - TimeSpan.FromMinutes(2));
+        AddText(store, new string('d', 50), T0 - TimeSpan.FromMinutes(1));
+        Assert.Equal(350, store.TotalBytes());
+
+        int removed = store.EnforceTotalLimit(120);
+
+        Assert.Equal(2, removed);
+        Assert.Equal(100, store.TotalBytes());
+    }
+
     private static string WriteBlob(HistoryStore store, byte[] data, DateTimeOffset writtenAt)
     {
         string name = store.Blobs.Save(data, "png");

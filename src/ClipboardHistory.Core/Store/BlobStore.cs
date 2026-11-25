@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Waigoma.ClipboardHistory.Capture;
 
 namespace Waigoma.ClipboardHistory.Store;
@@ -16,11 +17,8 @@ public sealed class BlobStore
     {
         string name = $"{ContentHasher.ForBytes(data)}.{extension}";
         string target = FullPath(name);
-        if (File.Exists(target))
+        if (File.Exists(target) && TryTouch(target))
         {
-            // The sweeper deletes old files it finds unreferenced, and this blob is about to be referenced by a row
-            // that is not committed yet. Touching it keeps the sweeper from deleting it in that window.
-            File.SetLastWriteTimeUtc(target, DateTime.UtcNow);
             return name;
         }
 
@@ -49,5 +47,51 @@ public sealed class BlobStore
         return name;
     }
 
+    // The worker writes its output to tmp and hands the file over here, so the bytes are never held in memory.
+    public string SaveFile(string sourcePath, string extension)
+    {
+        string name = $"{HashFile(sourcePath)}.{extension}";
+        string target = FullPath(name);
+        if (File.Exists(target) && TryTouch(target))
+        {
+            File.Delete(sourcePath);
+            return name;
+        }
+
+        try
+        {
+            File.Move(sourcePath, target, overwrite: false);
+        }
+        catch (IOException) when (File.Exists(target))
+        {
+            // A concurrent writer stored identical bytes first, so its copy stands and the source is redundant.
+            File.Delete(sourcePath);
+        }
+
+        return name;
+    }
+
     public string FullPath(string fileName) => Path.Combine(_paths.Files, fileName);
+
+    // The sweeper deletes old files it finds unreferenced, and a blob that is about to be referenced by an
+    // uncommitted row must look young. A file that vanished after the Exists check is reported as not touched,
+    // so the caller writes it again instead of failing.
+    internal static bool TryTouch(string target)
+    {
+        try
+        {
+            File.SetLastWriteTimeUtc(target, DateTime.UtcNow);
+            return true;
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private static string HashFile(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return Convert.ToHexStringLower(SHA256.HashData(stream));
+    }
 }

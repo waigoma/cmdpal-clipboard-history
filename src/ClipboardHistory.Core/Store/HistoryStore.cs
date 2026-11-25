@@ -105,7 +105,8 @@ public sealed partial class HistoryStore : IDisposable
             EntryKind kind;
             string? name;
             string? body;
-            using (SqliteCommand select = _db.Command("SELECT kind, name, body FROM entries WHERE id = @id", ("@id", id)))
+            ImageState state;
+            using (SqliteCommand select = _db.Command("SELECT kind, name, body, image_state FROM entries WHERE id = @id", ("@id", id)))
             using (SqliteDataReader reader = select.ExecuteReader())
             {
                 if (!reader.Read())
@@ -117,6 +118,14 @@ public sealed partial class HistoryStore : IDisposable
                 kind = (EntryKind)reader.GetInt32(0);
                 name = NullableString(reader, 1);
                 body = NullableString(reader, 2);
+                state = (ImageState)reader.GetInt32(3);
+            }
+
+            // An entry whose image was dropped (for example by a text edit) has nothing to complete, and must not
+            // gain an OCR or QR result that the user did not ask for.
+            if (state == ImageState.None)
+            {
+                return;
             }
 
             if (pngFile is not null)

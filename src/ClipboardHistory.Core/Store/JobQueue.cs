@@ -42,15 +42,17 @@ public sealed class JobQueue
         command.ExecuteNonQuery();
     }
 
-    public Job? Claim()
+    // Only jobs with an id above afterId are considered, so a caller that passes the last id it claimed visits
+    // each job at most once per pass, even when a failed job goes back to pending.
+    public Job? Claim(long afterId = 0)
     {
         lock (_db.Gate)
         {
             using WriteTransaction transaction = _db.BeginWrite();
             Job? job;
             using (SqliteCommand command = _db.Command(
-                "UPDATE jobs SET state = 1 WHERE entry_id = (SELECT entry_id FROM jobs WHERE state = @pending ORDER BY entry_id LIMIT 1) RETURNING entry_id, attempts",
-                ("@pending", StatePending)))
+                "UPDATE jobs SET state = 1 WHERE entry_id = (SELECT entry_id FROM jobs WHERE state = @pending AND entry_id > @after ORDER BY entry_id LIMIT 1) RETURNING entry_id, attempts",
+                ("@pending", StatePending), ("@after", afterId)))
             using (SqliteDataReader reader = command.ExecuteReader())
             {
                 job = reader.Read() ? new Job(reader.GetInt64(0), reader.GetInt32(1)) : null;

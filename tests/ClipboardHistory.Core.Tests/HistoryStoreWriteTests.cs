@@ -97,6 +97,26 @@ public sealed class HistoryStoreWriteTests
     }
 
     [Fact]
+    public void CompleteImage_OnEntryWithoutImageState_IsNoOp_AndRaisesNothing()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long id = store.Upsert(Text("plain text")).Id;
+        int raised = 0;
+        store.Changed += () => raised++;
+
+        store.CompleteImage(id, 640, 480, null, "thumb.png", "文字", "qr");
+
+        Assert.Equal(0, raised);
+        EntryDetail detail = Get(store, id);
+        Assert.Equal(ImageState.None, detail.Summary.ImageState);
+        Assert.Null(detail.Ocr);
+        Assert.Null(detail.Qr);
+        Assert.Equal(0, detail.Summary.Width);
+        Assert.Null(detail.Summary.ThumbPath);
+    }
+
+    [Fact]
     public void Upsert_WithImageFormat_SetsPendingAndQueuesOneJob()
     {
         using var temp = new TempStore();

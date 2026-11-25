@@ -41,6 +41,41 @@ public sealed class JobQueueTests
     }
 
     [Fact]
+    public void Claim_AfterId_SkipsJobsAtOrBelowIt()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long first = AddImage(store, "one");
+        long second = AddImage(store, "two");
+        long third = AddImage(store, "three");
+
+        Assert.Equal(second, store.Jobs.Claim(first)?.EntryId);
+        Assert.Equal(third, store.Jobs.Claim(second)?.EntryId);
+        Assert.Null(store.Jobs.Claim(third));
+        // The job below the cut-off stays pending for a later pass.
+        Assert.Equal(0, RawDb.Scalar(temp.Paths, "SELECT COUNT(*) FROM jobs WHERE state = 0 AND entry_id > " + first));
+        Assert.True(store.Jobs.HasPending());
+    }
+
+    [Fact]
+    public void Claim_AfterLastClaimedId_DoesNotReturnAFailedJobAgainInTheSamePass()
+    {
+        // A failed job goes back to pending with a smaller id, so the pass must move past it rather than spin on it.
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long failing = AddImage(store, "one");
+        long next = AddImage(store, "two");
+
+        Job? claimed = store.Jobs.Claim(0);
+        store.Jobs.Fail(failing);
+        Job? following = store.Jobs.Claim(claimed!.EntryId);
+
+        Assert.Equal(failing, claimed.EntryId);
+        Assert.Equal(next, following?.EntryId);
+        Assert.Null(store.Jobs.Claim(following!.EntryId));
+    }
+
+    [Fact]
     public void Complete_RemovesTheJob()
     {
         using var temp = new TempStore();

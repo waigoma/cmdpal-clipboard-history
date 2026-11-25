@@ -7,4 +7,8 @@
     <PackageReference Include="SQLitePCLRaw.bundle_winsqlite3" />
     <PackageReference Include="ZXing.Net" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- Lets the tests reach the one internal helper that models a file vanishing mid-save. -->
+    <InternalsVisibleTo Include="ClipboardHistory.Core.Tests" />
+  </ItemGroup>
 </Project>

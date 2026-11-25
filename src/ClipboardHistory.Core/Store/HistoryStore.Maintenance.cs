@@ -165,15 +165,18 @@ public sealed partial class HistoryStore
         lock (_db.Gate)
         {
             using WriteTransaction transaction = _db.BeginWrite();
-            while (Convert.ToInt64(ScalarValue("SELECT COALESCE(SUM(byte_size), 0) FROM entries"), CultureInfo.InvariantCulture) > maxBytes)
+            // The total is read once and then tracked by subtraction, so the loop costs one scan per deleted row.
+            long total = Convert.ToInt64(ScalarValue("SELECT COALESCE(SUM(byte_size), 0) FROM entries"), CultureInfo.InvariantCulture);
+            while (total > maxBytes)
             {
-                object? oldest = ScalarValue("SELECT id FROM entries WHERE pinned = 0 ORDER BY last_copied_at ASC, id ASC LIMIT 1");
-                if (oldest is null or DBNull)
+                (long Id, long ByteSize)? oldest = ReadOldestUnpinned();
+                if (oldest is not { } row)
                 {
                     break;
                 }
 
-                ExecuteWrite("DELETE FROM entries WHERE id = @id", ("@id", Convert.ToInt64(oldest, CultureInfo.InvariantCulture)));
+                ExecuteWrite("DELETE FROM entries WHERE id = @id", ("@id", row.Id));
+                total -= row.ByteSize;
                 removed++;
             }
 
@@ -255,6 +258,19 @@ public sealed partial class HistoryStore
             NullableString(reader, 2),
             reader.GetInt64(3) != 0,
             reader.GetInt64(4));
+    }
+
+    private (long Id, long ByteSize)? ReadOldestUnpinned()
+    {
+        using SqliteCommand command = _db.Command(
+            "SELECT id, byte_size FROM entries WHERE pinned = 0 ORDER BY last_copied_at ASC, id ASC LIMIT 1");
+        using SqliteDataReader reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return (reader.GetInt64(0), reader.GetInt64(1));
     }
 
     private SearchParts? ReadSearchParts(long id)

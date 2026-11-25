@@ -7,6 +7,7 @@ namespace Waigoma.ClipboardHistory.Extension;
 public partial class HistoryCommandsProvider : CommandProvider
 {
     private readonly IListItem[] _topLevel;
+    private readonly HistoryPage? _page;
 
     // withEntry false gives a provider with no commands, which is the fallback when the normal one cannot be built.
     internal HistoryCommandsProvider(AppHost? host, bool withEntry = true)
@@ -19,17 +20,31 @@ public partial class HistoryCommandsProvider : CommandProvider
             Settings = host.Settings.Settings;
         }
 
-        // Task 10 replaces this placeholder with the history page and its commands.
-        _topLevel = withEntry
-            ? new IListItem[]
+        // Without a host there is no store to show, so the provider lists nothing rather than a page that cannot work.
+        _topLevel = Array.Empty<IListItem>();
+        if (host is null || !withEntry)
+        {
+            return;
+        }
+
+        try
+        {
+            _page = new HistoryPage(host, new EntryItemFactory(host));
+            _topLevel = new IListItem[]
             {
-                new ListItem(new NoOpCommand())
+                new ListItem(_page)
                 {
-                    Title = "クリップボード履歴",
+                    Title = HistoryPage.PageName,
                     Icon = new IconInfo(""),
                 },
-            }
-            : Array.Empty<IListItem>();
+            };
+        }
+        catch (Exception ex)
+        {
+            Log.Error("HistoryCommandsProvider.CreatePage", ex);
+            _page = null;
+            _topLevel = Array.Empty<IListItem>();
+        }
     }
 
     public override IListItem[] TopLevelCommands()
@@ -47,6 +62,15 @@ public partial class HistoryCommandsProvider : CommandProvider
 
     public override void Dispose()
     {
+        try
+        {
+            _page?.Close();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("HistoryCommandsProvider.Dispose", ex);
+        }
+
         base.Dispose();
         GC.SuppressFinalize(this);
     }

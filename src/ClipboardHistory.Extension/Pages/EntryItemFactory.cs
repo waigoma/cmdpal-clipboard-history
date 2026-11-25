@@ -1,0 +1,186 @@
+using System.Globalization;
+using Microsoft.CommandPalette.Extensions;
+using Microsoft.CommandPalette.Extensions.Toolkit;
+using Waigoma.ClipboardHistory.Capture;
+using Waigoma.ClipboardHistory.Presentation;
+
+namespace Waigoma.ClipboardHistory.Extension;
+
+// Turns a stored summary into a list row. The page keeps the rows it has built, so this runs once per change.
+internal sealed class EntryItemFactory
+{
+    internal const string MissingFileTag = "見つかりません";
+    internal const string UnknownSource = "不明";
+
+    private const string TextGlyph = "";
+    private const string LinkGlyph = "";
+    private const string EmailGlyph = "";
+    private const string ColorGlyph = "";
+    private const string ImageGlyph = "";
+    private const string FilesGlyph = "";
+
+    private const string ColorSwatch = "■";
+
+    private readonly AppHost _host;
+
+    public EntryItemFactory(AppHost host)
+    {
+        _host = host ?? throw new ArgumentNullException(nameof(host));
+    }
+
+    public ListItem Create(EntrySummary e)
+    {
+        try
+        {
+            return new HistoryListItem(CommandFor(e), e, _host)
+            {
+                Title = TitleOf(e),
+                Subtitle = SubtitleOf(e),
+                Icon = IconOf(e),
+                Tags = TagsOf(e),
+                Section = DateSections.Of(e, TimeProvider.System.GetLocalNow()),
+            };
+        }
+        catch (Exception ex)
+        {
+            Log.Error("EntryItemFactory.Create", ex);
+            return new ListItem(new NoOpCommand()) { Title = TitleOf(e) };
+        }
+    }
+
+    internal static string KindName(EntryKind kind) => kind switch
+    {
+        EntryKind.Link => "リンク",
+        EntryKind.Email => "メール",
+        EntryKind.Color => "色",
+        EntryKind.Image => "画像",
+        EntryKind.Files => "ファイル",
+        _ => "テキスト",
+    };
+
+    // The title is the name the user gave the entry, or the preview. Line breaks would break the single-line row.
+    internal static string TitleOf(EntrySummary e)
+    {
+        return SingleLine(string.IsNullOrWhiteSpace(e.Name) ? e.Preview : e.Name);
+    }
+
+    internal static string SingleLine(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return string.Empty;
+        }
+
+        return string.Join(' ', text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)).Trim();
+    }
+
+    // The single attachment point for commands. Task 11 replaces the no-op with the paste, copy and edit commands.
+    private static ICommand CommandFor(EntrySummary e) => new NoOpCommand();
+
+    // A named entry shows its preview under the name; an unnamed one shows where and when it was copied.
+    private static string SubtitleOf(EntrySummary e)
+    {
+        if (!string.IsNullOrWhiteSpace(e.Name))
+        {
+            return SingleLine(e.Preview);
+        }
+
+        string source = string.IsNullOrWhiteSpace(e.SourceApp) ? UnknownSource : SingleLine(e.SourceApp);
+        return source + " · " + e.LastCopiedAt.ToLocalTime().ToString("HH:mm", CultureInfo.InvariantCulture);
+    }
+
+    private static IconInfo IconOf(EntrySummary e)
+    {
+        if (e.Kind == EntryKind.Image && e.ThumbPath is not null && File.Exists(e.ThumbPath))
+        {
+            return new IconInfo(e.ThumbPath);
+        }
+
+        return new IconInfo(GlyphOf(e.Kind));
+    }
+
+    private static string GlyphOf(EntryKind kind) => kind switch
+    {
+        EntryKind.Link => LinkGlyph,
+        EntryKind.Email => EmailGlyph,
+        EntryKind.Color => ColorGlyph,
+        EntryKind.Image => ImageGlyph,
+        EntryKind.Files => FilesGlyph,
+        _ => TextGlyph,
+    };
+
+    private ITag[] TagsOf(EntrySummary e)
+    {
+        var tags = new List<ITag>(1);
+
+        if (e.Kind == EntryKind.Color && ColorParser.TryParse(e.Preview, out Rgba rgba))
+        {
+            tags.Add(new Tag
+            {
+                Text = ColorSwatch,
+                Foreground = new OptionalColor(true, new Color(rgba.R, rgba.G, rgba.B, 255)),
+            });
+        }
+
+        if (e.Kind == EntryKind.Files && FirstFileMissing(e))
+        {
+            tags.Add(new Tag(MissingFileTag));
+        }
+
+        return tags.ToArray();
+    }
+
+    // Only the first path is probed, and a UNC path is never probed, because a stalled network share would stall the list.
+    private bool FirstFileMissing(EntrySummary e)
+    {
+        try
+        {
+            string? first = EntryDetailsBuilder.PathsOf(_host.Store.Get(e.Id)?.Body).FirstOrDefault();
+            if (string.IsNullOrEmpty(first) || first.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            return !File.Exists(first) && !Directory.Exists(first);
+        }
+        catch (Exception ex)
+        {
+            Log.Error("EntryItemFactory.FirstFileMissing", ex);
+            return false;
+        }
+    }
+}
+
+// A list row whose details are read from the store the first time they are asked for, so a long list costs nothing
+// until a row is actually opened.
+internal sealed partial class HistoryListItem : ListItem
+{
+    private readonly Lazy<IDetails> _details;
+
+    public HistoryListItem(ICommand command, EntrySummary summary, AppHost host)
+        : base(command)
+    {
+        _details = new Lazy<IDetails>(() => EntryDetailsBuilder.Build(host, summary));
+    }
+
+    // The setter is ignored: the details always come from the store, never from a value assigned by the host.
+    public override IDetails? Details
+    {
+        get
+        {
+            try
+            {
+                return _details.Value;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("HistoryListItem.Details", ex);
+                return new Microsoft.CommandPalette.Extensions.Toolkit.Details { Title = Title };
+            }
+        }
+
+        set
+        {
+        }
+    }
+}

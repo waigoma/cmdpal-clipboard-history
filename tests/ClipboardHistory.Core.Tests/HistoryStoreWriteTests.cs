@@ -336,6 +336,92 @@ public sealed class HistoryStoreWriteTests
         Assert.False(File.Exists(temp.Paths.Db));
     }
 
+    [Fact]
+    public void CompleteImage_RecomputesByteSize_FromBodyAndCurrentFormats()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        byte[] dib = { 1, 1, 1 };
+        long id = store.Upsert(new CapturedEntry(EntryKind.Image, null, new[] { new ClipFormat(FormatNames.Dib, dib) },
+            ContentHasher.ForBytes(dib), null, T0)).Id;
+        Assert.Equal(3, Get(store, id).Summary.ByteSize);
+        byte[] png = { 9, 9, 9, 9, 9 };
+        string pngFile = store.Blobs.Save(png, "png");
+
+        store.CompleteImage(id, 2, 2, pngFile, null, null, null);
+
+        Assert.Equal(png.Length, Get(store, id).Summary.ByteSize);
+    }
+
+    [Fact]
+    public void Upsert_RecopyOfNonImageEntryWithoutImageFormats_ClearsImageStateJobAndThumb()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        CapturedEntry entry = Text("plain");
+        long id = store.Upsert(entry).Id;
+        RawDb.Execute(temp.Paths, $"UPDATE entries SET image_state = 1, thumb = 'stale.png' WHERE id = {id}");
+        RawDb.Execute(temp.Paths, $"INSERT INTO jobs(entry_id, attempts, state) VALUES({id}, 0, 0)");
+
+        store.Upsert(entry with { CopiedAt = T0 + TimeSpan.FromMinutes(1) });
+
+        EntrySummary summary = Get(store, id).Summary;
+        Assert.Equal(ImageState.None, summary.ImageState);
+        Assert.Null(summary.ThumbPath);
+        Assert.Null(store.Jobs.Claim());
+        Assert.Equal(0, RawDb.Scalar(temp.Paths, "SELECT COUNT(*) FROM jobs"));
+    }
+
+    [Fact]
+    public void Upsert_NewEntryCreatedAt_IsCapturedCopiedAt_NotClockNow()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        DateTimeOffset copied = T0 - TimeSpan.FromHours(1);
+        CapturedEntry entry = Text("old copy");
+
+        long id = store.Upsert(entry with { CopiedAt = copied }).Id;
+
+        EntrySummary summary = Get(store, id).Summary;
+        Assert.Equal(copied, summary.CreatedAt);
+        Assert.Equal(copied, summary.LastCopiedAt);
+    }
+
+    [Fact]
+    public void Upsert_WhenBlobWriteFails_LeavesNoRow_AndStoreStillWorks()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        // A file where the temp folder should be makes the blob write fail before any row is written.
+        Directory.Delete(temp.Paths.Temp);
+        File.WriteAllText(temp.Paths.Temp, "blocker");
+        var entry = new CapturedEntry(EntryKind.Text, "with html", new[] { Format(FormatNames.Html, "<b>x</b>") },
+            ContentHasher.ForText("with html"), null, T0);
+
+        Assert.ThrowsAny<IOException>(() => store.Upsert(entry));
+
+        Assert.Equal(0, RawDb.Scalar(temp.Paths, "SELECT COUNT(*) FROM entries"));
+        File.Delete(temp.Paths.Temp);
+        Directory.CreateDirectory(temp.Paths.Temp);
+        store.Upsert(Text("after failure"));
+        Assert.Equal(1, RawDb.Scalar(temp.Paths, "SELECT COUNT(*) FROM entries"));
+    }
+
+    [Fact]
+    public async Task Changed_HandlerMayCallGet_WithoutDeadlock()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        string? seenBody = null;
+        // The first row of a fresh database is id 1, so the handler can read it while the write is still being announced.
+        store.Changed += () => seenBody = store.Get(1)?.Body;
+
+        // A timeout turns a deadlock into a failure instead of a hung test run.
+        await Task.Run(() => store.Upsert(Text("reentrant"))).WaitAsync(TimeSpan.FromSeconds(10));
+
+        Assert.Equal("reentrant", seenBody);
+    }
+
     private static EntryDetail Get(HistoryStore store, long id) =>
         store.Get(id) ?? throw new InvalidOperationException("entry was not stored");
 

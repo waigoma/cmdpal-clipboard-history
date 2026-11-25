@@ -18,6 +18,9 @@ public sealed class BlobStore
         string target = FullPath(name);
         if (File.Exists(target))
         {
+            // The sweeper deletes old files it finds unreferenced, and this blob is about to be referenced by a row
+            // that is not committed yet. Touching it keeps the sweeper from deleting it in that window.
+            File.SetLastWriteTimeUtc(target, DateTime.UtcNow);
             return name;
         }
 

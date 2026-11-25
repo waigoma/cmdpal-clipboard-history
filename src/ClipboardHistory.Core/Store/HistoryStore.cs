@@ -41,34 +41,47 @@ public sealed partial class HistoryStore : IDisposable
         (long Id, bool IsNew) result;
         lock (_db.Gate)
         {
+            // Blobs reach the disk before BEGIN IMMEDIATE so that slow I/O does not hold the database write lock.
+            // A processed image keeps its formats, so its blobs are not written at all.
+            IReadOnlyList<SavedFormat>? saved = IsProcessedImage(e.Kind, FindEntry(e.Kind, e.Hash)) ? null : SaveFormats(e.Formats);
+
             using WriteTransaction transaction = _db.BeginWrite();
             long copiedAt = e.CopiedAt.ToUnixTimeMilliseconds();
             bool carriesImage = HasImageFormat(e.Formats);
             (long Id, ImageState State)? existing = FindEntry(e.Kind, e.Hash);
-            if (existing is { } row)
+            if (existing is { } row && IsProcessedImage(e.Kind, row))
             {
-                if (e.Kind == EntryKind.Image && row.State == ImageState.Done)
+                // A processed image already has its formats, OCR and thumbnail, so a re-copy only refreshes the time.
+                Touch(row.Id, copiedAt, e.SourceApp);
+                result = (row.Id, false);
+            }
+            else if (existing is { } existingRow)
+            {
+                // The row may have changed since the lookup above, so the blobs are saved again only in that rare case.
+                saved ??= SaveFormats(e.Formats);
+                WriteFormats(existingRow.Id, saved);
+                Touch(existingRow.Id, copiedAt, e.SourceApp);
+                if (carriesImage)
                 {
-                    // A processed image already has its formats, OCR and thumbnail, so a re-copy only refreshes the time.
-                    Touch(row.Id, copiedAt, e.SourceApp);
+                    SetImageState(existingRow.Id, ImageState.Pending);
+                    JobQueue.EnqueueCore(_db, existingRow.Id);
                 }
-                else
+                else if (e.Kind != EntryKind.Image)
                 {
-                    WriteFormats(row.Id, e.Formats);
-                    Touch(row.Id, copiedAt, e.SourceApp);
-                    if (carriesImage)
-                    {
-                        SetImageState(row.Id, ImageState.Pending);
-                        JobQueue.EnqueueCore(_db, row.Id);
-                    }
+                    // A re-copy without an image no longer has an image to process, so the old thumbnail and job go.
+                    SetImageState(existingRow.Id, ImageState.None);
+                    DeleteJob(existingRow.Id);
+                    ClearThumb(existingRow.Id);
                 }
 
-                result = (row.Id, false);
+                RecomputeByteSize(existingRow.Id);
+                result = (existingRow.Id, false);
             }
             else
             {
+                saved ??= SaveFormats(e.Formats);
                 long id = InsertEntry(e, copiedAt, carriesImage);
-                WriteFormats(id, e.Formats);
+                WriteFormats(id, saved);
                 if (carriesImage)
                 {
                     JobQueue.EnqueueCore(_db, id);
@@ -119,6 +132,7 @@ public sealed partial class HistoryStore : IDisposable
                 InsertFormat(id, FormatNames.Png, pngFile, new FileInfo(Blobs.FullPath(pngFile)).Length);
             }
 
+            RecomputeByteSize(id);
             using (SqliteCommand update = _db.Command(
                 "UPDATE entries SET width = @width, height = @height, thumb = @thumb, ocr = @ocr, qr = @qr, image_state = @state, search = @search WHERE id = @id",
                 ("@width", width), ("@height", height), ("@thumb", thumb), ("@ocr", ocr), ("@qr", qr),
@@ -252,7 +266,7 @@ public sealed partial class HistoryStore : IDisposable
             ("@hash", e.Hash),
             ("@preview", Preview(e)),
             ("@source", e.SourceApp),
-            ("@created", _clock.GetUtcNow().ToUnixTimeMilliseconds()),
+            ("@created", copiedAt),
             ("@copied", copiedAt),
             ("@bytes", byteSize),
             ("@chars", (long)(body?.Length ?? 0)),
@@ -284,18 +298,61 @@ public sealed partial class HistoryStore : IDisposable
         command.ExecuteNonQuery();
     }
 
-    private void WriteFormats(long entryId, IReadOnlyList<ClipFormat> formats)
+    // A format whose blob is already on disk, so the row can be written inside the transaction without I/O.
+    private sealed record SavedFormat(string Name, string File, long Size);
+
+    private IReadOnlyList<SavedFormat> SaveFormats(IReadOnlyList<ClipFormat> formats) =>
+        formats.Select(f => new SavedFormat(f.Name, Blobs.Save(f.Data, ExtensionFor(f.Name)), f.Data.Length)).ToList();
+
+    private void WriteFormats(long entryId, IReadOnlyList<SavedFormat> formats)
     {
         using (SqliteCommand delete = _db.Command("DELETE FROM formats WHERE entry_id = @id", ("@id", entryId)))
         {
             delete.ExecuteNonQuery();
         }
 
-        foreach (ClipFormat format in formats)
+        foreach (SavedFormat format in formats)
         {
-            string file = Blobs.Save(format.Data, ExtensionFor(format.Name));
-            InsertFormat(entryId, format.Name, file, format.Data.Length);
+            InsertFormat(entryId, format.Name, format.File, format.Size);
         }
+    }
+
+    private static bool IsProcessedImage(EntryKind kind, (long Id, ImageState State)? row) =>
+        kind == EntryKind.Image && row is { State: ImageState.Done };
+
+    private void DeleteJob(long entryId)
+    {
+        using SqliteCommand command = _db.Command("DELETE FROM jobs WHERE entry_id = @id", ("@id", entryId));
+        command.ExecuteNonQuery();
+    }
+
+    private void ClearThumb(long entryId)
+    {
+        using SqliteCommand command = _db.Command("UPDATE entries SET thumb = NULL WHERE id = @id", ("@id", entryId));
+        command.ExecuteNonQuery();
+    }
+
+    // byte_size is the body's UTF-8 size plus every current format, so it must follow each change to formats.
+    private void RecomputeByteSize(long entryId)
+    {
+        string? body;
+        using (SqliteCommand select = _db.Command("SELECT body FROM entries WHERE id = @id", ("@id", entryId)))
+        using (SqliteDataReader reader = select.ExecuteReader())
+        {
+            body = reader.Read() ? NullableString(reader, 0) : null;
+        }
+
+        long formatBytes;
+        using (SqliteCommand sum = _db.Command(
+            "SELECT COALESCE(SUM(size), 0) FROM formats WHERE entry_id = @id", ("@id", entryId)))
+        {
+            formatBytes = Convert.ToInt64(sum.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        }
+
+        long bodyBytes = body is null ? 0 : Encoding.UTF8.GetByteCount(body);
+        using SqliteCommand update = _db.Command(
+            "UPDATE entries SET byte_size = @bytes WHERE id = @id", ("@bytes", bodyBytes + formatBytes), ("@id", entryId));
+        update.ExecuteNonQuery();
     }
 
     private void InsertFormat(long entryId, string name, string file, long size)

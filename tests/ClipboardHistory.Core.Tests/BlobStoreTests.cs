@@ -40,6 +40,22 @@ public sealed class BlobStoreTests
     }
 
     [Fact]
+    public void Save_ExistingBlob_TouchesLastWriteTime()
+    {
+        using var temp = new TempStore();
+        temp.Paths.EnsureCreated();
+        var blobs = new BlobStore(temp.Paths);
+        byte[] data = Encoding.UTF8.GetBytes("old blob");
+        string name = blobs.Save(data, "html");
+        File.SetLastWriteTimeUtc(blobs.FullPath(name), DateTime.UtcNow.AddHours(-2));
+
+        blobs.Save(data, "html");
+
+        // The sweeper treats a young file as safe, so a re-save must make the existing blob young again.
+        Assert.True(File.GetLastWriteTimeUtc(blobs.FullPath(name)) > DateTime.UtcNow.AddMinutes(-5));
+    }
+
+    [Fact]
     public void FullPath_PointsInsideFilesFolder()
     {
         using var temp = new TempStore();

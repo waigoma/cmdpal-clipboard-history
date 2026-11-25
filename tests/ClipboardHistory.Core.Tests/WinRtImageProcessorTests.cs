@@ -158,6 +158,48 @@ public sealed class WinRtImageProcessorTests
         Assert.Equal(2, result.Height);
     }
 
+    [Fact]
+    public void Process_OcrStepThrows_StillWritesPngAndThumbnail_AndOcrIsNull()
+    {
+        using var temp = new TempStore();
+        temp.Paths.EnsureCreated();
+        string input = Path.Combine(temp.Root, "in.png");
+        string png = Path.Combine(temp.Root, "out.png");
+        string thumb = Path.Combine(temp.Root, "thumb.png");
+        WritePng(input, 300, 200, (x, y) => (10, 20, 30, 255));
+        var processor = new WinRtImageProcessor(
+            ocrStep: (_, _) => throw new InvalidOperationException("ocr failed"),
+            qrStep: (_, _) => "qr-text");
+
+        ImageResult result = processor.Process(input, false, png, thumb, ocr: true, qr: true);
+
+        Assert.Equal((300, 200), Dimensions(png));
+        Assert.Equal((128, 85), Dimensions(thumb));
+        Assert.Null(result.Ocr);
+        Assert.Equal("qr-text", result.Qr);
+    }
+
+    [Fact]
+    public void Process_QrStepThrows_StillWritesPngAndThumbnail_AndQrIsNull()
+    {
+        using var temp = new TempStore();
+        temp.Paths.EnsureCreated();
+        string input = Path.Combine(temp.Root, "in.png");
+        string png = Path.Combine(temp.Root, "out.png");
+        string thumb = Path.Combine(temp.Root, "thumb.png");
+        WritePng(input, 300, 200, (x, y) => (10, 20, 30, 255));
+        var processor = new WinRtImageProcessor(
+            ocrStep: (_, _) => "ocr-text",
+            qrStep: (_, _) => throw new InvalidOperationException("qr failed"));
+
+        ImageResult result = processor.Process(input, false, png, thumb, ocr: true, qr: true);
+
+        Assert.Equal((300, 200), Dimensions(png));
+        Assert.Equal((128, 85), Dimensions(thumb));
+        Assert.Equal("ocr-text", result.Ocr);
+        Assert.Null(result.Qr);
+    }
+
     private static void WritePng(string path, int width, int height, Func<int, int, (byte B, byte G, byte R, byte A)> pixel)
     {
         byte[] bgra = new byte[width * height * 4];

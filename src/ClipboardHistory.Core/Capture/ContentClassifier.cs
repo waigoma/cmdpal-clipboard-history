@@ -50,6 +50,8 @@ public static partial class ContentClassifier
     private static bool IsEmail(string text) => EmailPattern().IsMatch(text);
 
     // The domain must contain a dot, and '/' and ':' are excluded so that a path such as "a.com/x@b.com" is not an address.
-    [GeneratedRegex(@"^(?:mailto:)?[^\s@,/:]+@[^\s@,/:.]+(?:\.[^\s@,/:.]+)+\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    // Each domain label takes letters (ASCII or not), digits and '-' only, so a character that follows an address, such
+    // as '?' or '>', makes the text something else rather than being absorbed into the domain.
+    [GeneratedRegex(@"^(?:mailto:)?[^\s@,/:]+@[\p{L}0-9-]+(?:\.[\p{L}0-9-]+)+\z", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex EmailPattern();
 }

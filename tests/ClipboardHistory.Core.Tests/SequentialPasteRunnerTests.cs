@@ -152,6 +152,42 @@ public sealed class SequentialPasteRunnerTests
         Assert.False(h.LastAppendNewline);
     }
 
+    [Fact]
+    public void SecondRunBeforeDone_ReturnsBusy_AndBeginIsCalledOnce()
+    {
+        var h = new Harness(3, 2, 1);
+
+        Assert.Null(h.Runner.Run());
+        Assert.Equal(PasteOutcome.Busy, h.Runner.Run());
+
+        Assert.Single(h.Attempts);
+    }
+
+    [Fact]
+    public void AfterDone_RunWorksAgain()
+    {
+        var h = new Harness(3, 2, 1);
+
+        Assert.Null(h.Runner.Run());
+        Assert.Equal(PasteOutcome.Busy, h.Runner.Run());
+        h.Complete(PasteOutcome.FocusTimeout);
+
+        Assert.Null(h.Runner.Run());
+        Assert.Equal(new[] { "entry-3", "entry-3" }, h.Attempts);
+    }
+
+    [Fact]
+    public void NothingToBegin_ClearsTheInFlightFlag()
+    {
+        var h = new Harness();
+
+        Assert.Null(h.Runner.Run());
+        h.Ids.Add(1);
+
+        Assert.Null(h.Runner.Run());
+        Assert.Equal(new[] { "entry-1" }, h.Attempts);
+    }
+
     private sealed class Harness
     {
         private Action<PasteOutcome>? _pending;

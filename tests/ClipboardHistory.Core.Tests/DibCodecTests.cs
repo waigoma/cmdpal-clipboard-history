@@ -46,6 +46,40 @@ public sealed class DibCodecTests
     }
 
     [Fact]
+    public void ToBmp_24BppWithColourTable_PointsPastTheTableToo()
+    {
+        // Two colour-table entries of four bytes each sit between the header and the pixels.
+        byte[] dib = Dib(40, 2, 2, 24, BiRgb, 2, new byte[8 + 16]);
+
+        byte[] bmp = DibCodec.ToBmp(dib);
+
+        Assert.Equal(14u + 40u + 8u, ReadUInt32(bmp, 10));
+    }
+
+    [Fact]
+    public void TryDecode32_WithColourTable_ReadsPixelsAfterTheTable()
+    {
+        byte[] table = { 0xEE, 0xEE, 0xEE, 0, 0xEE, 0xEE, 0xEE, 0 };
+        byte[] pixels = { 1, 2, 3, 0, 4, 5, 6, 0 };
+        byte[] dib = Dib(40, 2, 1, 32, BiRgb, 2, Concat(table, pixels));
+
+        bool decoded = DibCodec.TryDecode32(dib, out int width, out int height, out byte[] bgra);
+
+        Assert.True(decoded);
+        Assert.Equal(2, width);
+        Assert.Equal(1, height);
+        Assert.Equal(new byte[] { 1, 2, 3, 255, 4, 5, 6, 255 }, bgra);
+    }
+
+    [Fact]
+    public void ToBmp_HighDepthColourTableBeyondTheLimit_IsRejected()
+    {
+        byte[] dib = Dib(40, 2, 2, 24, BiRgb, 1000, new byte[4000 * 4 + 16]);
+
+        Assert.Throws<InvalidDataException>(() => DibCodec.ToBmp(dib));
+    }
+
+    [Fact]
     public void ToBmp_V5Header_PointsPastTheWholeV5Header()
     {
         byte[] header = Dib(124, 1, 1, 32, BiBitfields, 0, new byte[4]);

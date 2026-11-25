@@ -1,3 +1,4 @@
+using System.Threading;
 using Waigoma.ClipboardHistory.Paste;
 
 namespace Waigoma.ClipboardHistory.Sequence;
@@ -16,6 +17,10 @@ public sealed class SequentialPasteRunner
 
     // Size of the id list the current session was started from, which bounds how many entries one run may skip.
     private int _snapshotSize;
+
+    // 1 from the start of a run until its paste finishes, or until the run ends without starting one. A second run in
+    // between would read the same position and paste the same entry twice.
+    private int _inFlight;
 
     public SequentialPasteRunner(
         SequentialPaste sequence,
@@ -39,19 +44,35 @@ public sealed class SequentialPasteRunner
     // failure of the run itself is logged and reported as SendFailed, so no exception leaves this method.
     public PasteOutcome? Run()
     {
+        if (Interlocked.CompareExchange(ref _inFlight, 1, 0) != 0)
+        {
+            return PasteOutcome.Busy;
+        }
+
+        // Stays set only when a paste was really started, because OnDone is what clears it in that case.
+        bool started = false;
         try
         {
-            return RunStep();
+            return RunStep(out started);
         }
         catch (Exception ex)
         {
             Log.Error("SequentialPasteRunner.Run", ex);
             return PasteOutcome.SendFailed;
         }
+        finally
+        {
+            if (!started)
+            {
+                Interlocked.Exchange(ref _inFlight, 0);
+            }
+        }
     }
 
-    private PasteOutcome? RunStep()
+    // started is true only when begin returned null, that is, a paste is in flight and OnDone will finish it.
+    private PasteOutcome? RunStep(out bool started)
     {
+        started = false;
         int skips = 0;
         while (true)
         {
@@ -76,7 +97,9 @@ public sealed class SequentialPasteRunner
                 continue;
             }
 
-            return _begin(payload, OnDone);
+            PasteOutcome? immediate = _begin(payload, OnDone);
+            started = immediate is null;
+            return immediate;
         }
     }
 
@@ -91,9 +114,16 @@ public sealed class SequentialPasteRunner
     // then has no position to move.
     private void OnDone(PasteOutcome outcome)
     {
-        if (outcome == PasteOutcome.Sent)
+        try
         {
-            _sequence.Advance();
+            if (outcome == PasteOutcome.Sent)
+            {
+                _sequence.Advance();
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _inFlight, 0);
         }
     }
 }

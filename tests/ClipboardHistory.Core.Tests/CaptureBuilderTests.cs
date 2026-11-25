@@ -227,6 +227,16 @@ public sealed class CaptureBuilderTests
     }
 
     [Fact]
+    public void Build_SourceAppIsNull_WhenPathEndsInASeparator()
+    {
+        // Path.GetFileName of a folder-like path is empty, which must read as unknown rather than as an empty name.
+        CapturedEntry? entry = CaptureBuilder.Build(Snapshot(text: "x", sourceExePath: @"C:\apps\"), Defaults, Now);
+
+        Assert.NotNull(entry);
+        Assert.Null(entry.SourceApp);
+    }
+
+    [Fact]
     public void Build_SourceAppIsNull_WhenSourceUnknown()
     {
         CapturedEntry? entry = CaptureBuilder.Build(Snapshot(text: "x"), Defaults, Now);

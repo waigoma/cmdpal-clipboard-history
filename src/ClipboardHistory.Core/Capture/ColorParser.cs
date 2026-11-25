@@ -10,6 +10,9 @@ public static partial class ColorParser
     // Patterns use [0-9] rather than \d: \d also matches Unicode digits, which the number parsing does not expect.
     private const RegexOptions PatternOptions = RegexOptions.IgnoreCase | RegexOptions.CultureInvariant;
 
+    // Longer numbers are not colour values; the limit keeps parsing cost and overflow out of reach.
+    private const int MaxNumberLength = 12;
+
     public static bool TryParse(string text, out Rgba color)
     {
         color = default;
@@ -158,9 +161,10 @@ public static partial class ColorParser
             return false;
         }
 
-        double saturation = ParseNumber(match.Groups["s"].Value);
-        double lightness = ParseNumber(match.Groups["l"].Value);
-        if (saturation > 100 || lightness > 100)
+        if (!TryParseNumber(match.Groups["s"].Value, out double saturation)
+            || !TryParseNumber(match.Groups["l"].Value, out double lightness)
+            || saturation > 100
+            || lightness > 100)
         {
             return false;
         }
@@ -171,7 +175,11 @@ public static partial class ColorParser
             return false;
         }
 
-        double hue = ParseNumber(match.Groups["h"].Value);
+        if (!TryParseNumber(match.Groups["h"].Value, out double hue))
+        {
+            return false;
+        }
+
         color = FromHsl(hue, saturation / 100, lightness / 100, alpha);
         return true;
     }
@@ -192,7 +200,11 @@ public static partial class ColorParser
     private static bool TryParseAlpha(Match match, out byte alpha)
     {
         alpha = 0;
-        double value = ParseNumber(match.Groups["a"].Value);
+        if (!TryParseNumber(match.Groups["a"].Value, out double value))
+        {
+            return false;
+        }
+
         if (match.Groups["p"].Success)
         {
             value /= 100;
@@ -207,8 +219,19 @@ public static partial class ColorParser
         return true;
     }
 
-    private static double ParseNumber(string text) =>
-        double.Parse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture);
+    // Length is capped before parsing, so a long digit run cannot overflow to infinity; the finiteness check covers
+    // what the length cap lets through, and a value that is not finite is not a colour.
+    private static bool TryParseNumber(string text, out double value)
+    {
+        value = 0;
+        if (text.Length > MaxNumberLength)
+        {
+            return false;
+        }
+
+        value = double.Parse(text, NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture);
+        return double.IsFinite(value);
+    }
 
     // Standard HSL-to-RGB conversion; hue is in degrees and wraps around.
     private static Rgba FromHsl(double hueDegrees, double saturation, double lightness, byte alpha)

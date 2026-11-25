@@ -87,6 +87,7 @@ internal sealed partial class HistoryPage : DynamicListPage
             string filter = _filters.CurrentFilterId ?? HistoryFilters.All;
             string search;
             int visible;
+            int cacheVersion;
             bool selfRefresh;
             lock (_gate)
             {
@@ -120,6 +121,9 @@ internal sealed partial class HistoryPage : DynamicListPage
                 _lastFilter = filter;
                 _lastSearch = search;
                 visible = _visible;
+
+                // Read before the query, so a drop that happens while the query runs is seen when the rows are stored.
+                cacheVersion = _cacheVersion;
             }
 
             if (!selfRefresh)
@@ -135,12 +139,10 @@ internal sealed partial class HistoryPage : DynamicListPage
             bool hasMore = rows.Count > visible;
 
             Dictionary<long, (EntrySummary Summary, ListItem Item)> previous;
-            int cacheVersion;
             lock (_gate)
             {
                 _hasMore = hasMore;
                 previous = new Dictionary<long, (EntrySummary Summary, ListItem Item)>(_cache);
-                cacheVersion = _cacheVersion;
             }
 
             // A row is reused while its summary is unchanged, so the selection and its details survive a refresh.

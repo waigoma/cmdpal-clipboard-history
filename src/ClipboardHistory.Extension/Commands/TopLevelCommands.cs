@@ -110,7 +110,8 @@ internal sealed partial class PauseCommand : InvokableCommand
     {
         try
         {
-            bool next = !Paused;
+            // The service's own state decides the toggle, so a change made elsewhere is not undone by a stale copy here.
+            bool next = !_host.Service.Paused;
             _host.Service.Paused = next;
             Paused = next;
             Name = NameFor(next);

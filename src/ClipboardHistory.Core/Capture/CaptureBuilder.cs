@@ -10,7 +10,9 @@ public static class CaptureBuilder
     public static CapturedEntry? Build(ClipboardSnapshot s, HistoryOptions o, DateTimeOffset now)
     {
         long limit = o.MaxFormatBytes;
-        string? sourceApp = string.IsNullOrEmpty(s.SourceExePath) ? null : Path.GetFileName(s.SourceExePath);
+        // A path that ends in a separator has an empty file name, which means the source is unknown, not an empty name.
+        string? fileName = string.IsNullOrEmpty(s.SourceExePath) ? null : Path.GetFileName(s.SourceExePath);
+        string? sourceApp = string.IsNullOrEmpty(fileName) ? null : fileName;
 
         // The primary kind is decided first and an oversize primary drops the whole entry (spec 6.1);
         // falling through to a lower kind would record content the user did not copy as the main item.

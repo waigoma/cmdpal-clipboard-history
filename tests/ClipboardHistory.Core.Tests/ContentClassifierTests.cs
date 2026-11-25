@@ -45,6 +45,28 @@ public sealed class ContentClassifierTests
         Assert.Equal(EntryKind.Text, ContentClassifier.ClassifyText(text));
     }
 
+    // Domain labels take letters, digits and '-' only, so punctuation that follows an address is not part of it.
+    [Theory]
+    [InlineData("a@b.co?x=1")]
+    [InlineData("a@b.com>")]
+    [InlineData("a@b_c.com")]
+    [InlineData("a@b.c%20om")]
+    [InlineData("a@b.com{")]
+    public void ClassifyText_ReturnsText_WhenDomainHasDisallowedCharacters(string text)
+    {
+        Assert.Equal(EntryKind.Text, ContentClassifier.ClassifyText(text));
+    }
+
+    [Theory]
+    [InlineData("user@sub-domain.example.co.jp")]
+    [InlineData("user@ドメイン.jp")]
+    [InlineData("user@例え.テスト")]
+    [InlineData("user@example2.com")]
+    public void ClassifyText_ReturnsEmail_WhenDomainUsesLettersDigitsHyphenAndNonAscii(string text)
+    {
+        Assert.Equal(EntryKind.Email, ContentClassifier.ClassifyText(text));
+    }
+
     [Theory]
     [InlineData("#fff")]
     [InlineData("#3A7BD5")]
@@ -139,5 +161,20 @@ public sealed class ColorParserTests
     public void TryParse_ReturnsFalse_ForInvalidInput(string text)
     {
         Assert.False(ColorParser.TryParse(text, out _));
+    }
+
+    [Fact]
+    public void TryParse_HueWithFourHundredDigits_IsNotAColor()
+    {
+        // Parsed on its own this overflows to infinity, which must not turn into a colour.
+        string hue = new string('9', 400);
+
+        Assert.False(ColorParser.TryParse($"hsl({hue},50%,50%)", out _));
+    }
+
+    [Fact]
+    public void TryParse_HueWithTooManyDigits_IsNotAColor()
+    {
+        Assert.False(ColorParser.TryParse("hsl(120.0000000000000000000001,50%,50%)", out _));
     }
 }

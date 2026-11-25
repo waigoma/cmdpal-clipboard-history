@@ -10,6 +10,9 @@ public static class Log
     private const string RotatedFileName = "log.1.txt";
     private const long MaxBytes = 1024 * 1024;
 
+    // Deeper inner chains are cut off, so a pathological exception cannot grow a single log line without bound.
+    private const int MaxInnerDepth = 8;
+
     private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
     private static readonly object Gate = new();
     private static string? _directory;
@@ -54,6 +57,14 @@ public static class Log
                     builder.Append(" type=").Append(ex.GetType().FullName)
                         .Append(" hresult=0x").Append(ex.HResult.ToString("X8", CultureInfo.InvariantCulture))
                         .AppendLine().Append(ex.StackTrace);
+
+                    // The inner chain often holds the real cause (a file lock, for one), so its type and code are kept too.
+                    int depth = 0;
+                    for (Exception? inner = ex.InnerException; inner is not null && depth < MaxInnerDepth; inner = inner.InnerException, depth++)
+                    {
+                        builder.AppendLine().Append("  inner type=").Append(inner.GetType().FullName)
+                            .Append(" hresult=0x").Append(inner.HResult.ToString("X8", CultureInfo.InvariantCulture));
+                    }
                 }
 
                 builder.AppendLine();
@@ -61,7 +72,7 @@ public static class Log
                 string path = Path.Combine(_directory, FileName);
                 if (File.Exists(path) && new FileInfo(path).Length >= MaxBytes)
                 {
-                    File.Move(path, Path.Combine(_directory, RotatedFileName), overwrite: true);
+                    TryRotate(path);
                 }
 
                 File.AppendAllText(path, builder.ToString(), Utf8NoBom);
@@ -70,6 +81,23 @@ public static class Log
             {
                 // Dropping one line is preferable to failing the caller.
             }
+        }
+    }
+
+    // A rotation that cannot complete, because the previous log is held open, leaves the file as it is. The line is
+    // still appended, so a locked archive never costs the newest entries.
+    private static void TryRotate(string path)
+    {
+        try
+        {
+            File.Move(path, Path.Combine(_directory!, RotatedFileName), overwrite: true);
+        }
+        catch (IOException)
+        {
+            // Skipping the rotation is the whole recovery; logging from here would re-enter Write under the same lock.
+        }
+        catch (UnauthorizedAccessException)
+        {
         }
     }
 }

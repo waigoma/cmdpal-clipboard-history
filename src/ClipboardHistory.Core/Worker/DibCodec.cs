@@ -8,6 +8,7 @@ public static class DibCodec
     private const int FileHeaderSize = 14;
     private const int V5HeaderSize = 124;
     private const int MaxDimension = 32767;
+    private const uint MaxHighDepthColors = 256;
 
     private const uint BiRgb = 0;
     private const uint BiBitfields = 3;
@@ -211,6 +212,18 @@ public static class DibCodec
                 }
 
                 palette = colors * 4;
+            }
+            else if (clrUsed > 0)
+            {
+                // A colour table is optional above 8 bpp, but when biClrUsed names one it sits between the masks and
+                // the pixels, so the pixel offset must skip it. Real producers stay far below the cap; the buffer check
+                // below rejects any table that does not fit.
+                if (clrUsed > MaxHighDepthColors)
+                {
+                    throw Invalid("DIB colour table is larger than a high bit depth image uses.");
+                }
+
+                palette = (long)clrUsed * 4;
             }
 
             long pixelOffset = headerSize + masks + palette;

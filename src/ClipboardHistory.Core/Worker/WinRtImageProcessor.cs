@@ -18,6 +18,20 @@ public sealed class WinRtImageProcessor : IImageProcessor
     private const uint QrLongSide = 2000;
 
     private readonly Lazy<OcrEngine?> _ocrEngine = new(OcrEngine.TryCreateFromUserProfileLanguages);
+    private readonly Func<SoftwareBitmap, string, string?> _ocrStep;
+    private readonly Func<SoftwareBitmap, string, string> _qrStep;
+
+    public WinRtImageProcessor()
+        : this(null, null)
+    {
+    }
+
+    // The OCR and QR steps are replaceable so a test can make one of them fail; production always uses the defaults.
+    internal WinRtImageProcessor(Func<SoftwareBitmap, string, string?>? ocrStep, Func<SoftwareBitmap, string, string>? qrStep)
+    {
+        _ocrStep = ocrStep ?? RunOcr;
+        _qrStep = qrStep ?? RunQr;
+    }
 
     public ImageResult Process(string inputPath, bool inputIsDib, string pngOutPath, string thumbOutPath, bool ocr, bool qr)
     {
@@ -29,9 +43,23 @@ public sealed class WinRtImageProcessor : IImageProcessor
         (uint thumbWidth, uint thumbHeight) = Fit(width, height, ThumbnailLongSide);
         WritePng(bitmap, thumbOutPath, thumbWidth, thumbHeight);
 
-        string? ocrText = ocr ? RunOcr(bitmap, pngOutPath) : null;
-        string? qrText = qr ? RunQr(bitmap, pngOutPath) : null;
+        string? ocrText = ocr ? Guarded("WinRtImageProcessor.Ocr", () => _ocrStep(bitmap, pngOutPath)) : null;
+        string? qrText = qr ? Guarded("WinRtImageProcessor.Qr", () => _qrStep(bitmap, pngOutPath)) : null;
         return new ImageResult((int)width, (int)height, ocrText, qrText);
+    }
+
+    // A failing OCR or QR step loses only its own text: the image, its PNG and its thumbnail are already written.
+    private static string? Guarded(string where, Func<string?> step)
+    {
+        try
+        {
+            return step();
+        }
+        catch (Exception ex)
+        {
+            Log.Error(where, ex);
+            return null;
+        }
     }
 
     public void WriteDib(string pngPath, string dibOutPath)

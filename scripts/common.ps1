@@ -48,7 +48,7 @@ function Find-SignTool {
         }
 
         $tool = Get-ChildItem -LiteralPath $root -Recurse -Filter 'signtool.exe' -File |
-            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' -and $_.Directory.Parent.Name -match '^\d+(\.\d+){1,3}$' } |
+            Where-Object { $_.FullName -match '\\x64\\signtool\.exe$' -and $_.Directory.Parent.Name -match '^[0-9]+(\.[0-9]+){1,3}$' } |
             Sort-Object -Property @{ Expression = { [version]$_.Directory.Parent.Name } } -Descending |
             Select-Object -First 1
         if ($null -ne $tool) {

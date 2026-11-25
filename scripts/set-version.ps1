@@ -13,7 +13,7 @@ $manifestPath = Join-Path $repoRoot 'src\ClipboardHistory.Extension\Package.appx
 
 try {
     # No leading zeros (0 itself is fine), so each tag has exactly one spelling; 0.0.0 is not a release.
-    if (-not ($Version -match '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') -or $Version -eq '0.0.0') {
+    if (-not ($Version -match '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$') -or $Version -eq '0.0.0') {
         throw 'バージョンは 0.0.0 以外の x.y.z の形式で指定してください (先頭に 0 は付けません。例: 0.2.0)。'
     }
     $parts = @($Matches[1], $Matches[2], $Matches[3])
@@ -66,3 +66,6 @@ catch {
 
 Write-Output ('パッケージのバージョンを {0} に設定しました。' -f $packageVersion)
 Write-Output $Version
+
+# Explicit success code: $LASTEXITCODE stays $null after a script that runs no native command, and callers check it.
+exit 0

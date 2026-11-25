@@ -37,3 +37,6 @@ catch {
     [Console]::Error.WriteLine(('削除に失敗しました: {0}' -f $_.Exception.Message))
     exit 1
 }
+
+# Explicit success code, see set-version.ps1.
+exit 0

@@ -94,3 +94,6 @@ $unsignedPath = Join-Path $unsignedDir ('ClipboardHistory_{0}_x64.msix' -f $msix
 Copy-Item -LiteralPath $msix.FullName -Destination $unsignedPath -Force
 
 Write-Output $layout
+
+# Explicit success code, see set-version.ps1.
+exit 0

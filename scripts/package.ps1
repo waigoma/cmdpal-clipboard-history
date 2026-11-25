@@ -92,3 +92,6 @@ catch {
 }
 
 Write-Output $msixPath
+
+# Explicit success code, see set-version.ps1.
+exit 0

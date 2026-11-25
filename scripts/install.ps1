@@ -17,7 +17,7 @@ $packageName = 'waigoma.CmdPal.ClipboardHistory'
 function Select-ClipboardPackage {
     param([Parameter(Mandatory)][string]$Folder)
     $candidates = foreach ($file in @(Get-ChildItem -LiteralPath $Folder -Filter 'ClipboardHistory_*_x64.msix' -File -ErrorAction SilentlyContinue)) {
-        if ($file.Name -match '^ClipboardHistory_(\d+\.\d+\.\d+\.\d+)_x64\.msix$') {
+        if ($file.Name -match '^ClipboardHistory_([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+)_x64\.msix$') {
             [pscustomobject]@{ File = $file; Version = [version]$Matches[1] }
         }
     }
@@ -126,3 +126,6 @@ catch {
     [Console]::Error.WriteLine(('導入に失敗しました: {0}' -f $_.Exception.Message))
     exit 1
 }
+
+# Explicit success code, see set-version.ps1.
+exit 0

@@ -24,6 +24,10 @@ $success = $false
 $cert = $null
 $password = $null
 $pfxWritten = $false
+$createdFolder = $false
+$outFolder = $null
+# $clipboardSet means the clipboard may hold a secret. It is set before the first clipboard write, so every path after that
+# point (failure, Ctrl+C, a closed window) clears the clipboard in finally.
 $clipboardSet = $false
 $secretMayBeUsed = $false
 
@@ -101,18 +105,25 @@ function Test-IsSameOrUnder {
     return $Child.StartsWith($Parent.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)
 }
 
-# Leaves the PFX readable by the current user only: no inherited entries, one full control entry.
+# Leaves a file or folder readable by the current user only: no inherited entries, one full control entry. A folder
+# passes -Container so that files created inside it inherit the same restriction.
 function Set-CurrentUserOnlyAcl {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [switch]$Container)
     $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
     $acl = Get-Acl -LiteralPath $Path
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($rule in @($acl.Access)) {
         [void]$acl.RemoveAccessRule($rule)
     }
+    $inheritance = [System.Security.AccessControl.InheritanceFlags]::None
+    if ($Container) {
+        $inheritance = [System.Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+    }
     $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
         $sid,
         [System.Security.AccessControl.FileSystemRights]::FullControl,
+        $inheritance,
+        [System.Security.AccessControl.PropagationFlags]::None,
         [System.Security.AccessControl.AccessControlType]::Allow)
     $acl.AddAccessRule($rule)
     Set-Acl -LiteralPath $Path -AclObject $acl
@@ -174,7 +185,13 @@ try {
     if (Test-Path -LiteralPath $OutFile) {
         throw '出力先に同名のファイルがあります。上書きしません。別のパスを指定するか、そのファイルを移動してください。'
     }
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutFile) | Out-Null
+    # A folder this run creates gets the owner-only ACL at once, so nothing written into it is ever more widely readable.
+    $outFolder = Split-Path -Parent $OutFile
+    if (-not (Test-Path -LiteralPath $outFolder)) {
+        New-Item -ItemType Directory -Path $outFolder | Out-Null
+        $createdFolder = $true
+        Set-CurrentUserOnlyAcl -Path $outFolder -Container
+    }
 
     Write-Output '証明書を作成しています (有効期間 5 年、秘密鍵はエクスポート可能)...'
     # The code signing EKU is set by hand, matching the development certificate script.
@@ -206,10 +223,13 @@ try {
         $rng.Dispose()
     }
 
-    $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
-    Export-PfxCertificate -Cert $cert -FilePath $OutFile -Password $securePassword -CryptoAlgorithmOption AES256_SHA256 | Out-Null
+    # The file exists with the owner-only ACL before the export writes anything into it, so its rights are never wider.
+    New-Item -ItemType File -Path $OutFile | Out-Null
     $pfxWritten = $true
     Set-CurrentUserOnlyAcl -Path $OutFile
+
+    $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
+    Export-PfxCertificate -Cert $cert -FilePath $OutFile -Password $securePassword -CryptoAlgorithmOption AES256_SHA256 -Force | Out-Null
 
     # Once the PFX is written, the store copy is no longer needed; it is removed together with its private key.
     Remove-Item -LiteralPath (Join-Path $store $cert.Thumbprint) -DeleteKey -Confirm:$false -ErrorAction Stop
@@ -227,16 +247,17 @@ try {
         $pfxBase64 = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($OutFile))
 
         # The password comes first: it exists only in memory, so it must be stored before anything else happens.
+        # The flags are set before the first write, so a write that fails halfway is still cleared in finally.
+        $secretMayBeUsed = $true
+        $clipboardSet = $true
         $confirmed = $false
         while (-not $confirmed) {
-            $secretMayBeUsed = $true
             Set-SecretClipboard -Text $password
             Write-Output 'パスワードをクリップボードにコピーしました。'
             Write-Output 'パスワードマネージャーに今すぐ保存し、GitHub の SIGNING_PFX_PASSWORD にも貼り付けてから Enter を押してください。'
             [void](Read-Host)
 
             Set-SecretClipboard -Text $pfxBase64
-            $clipboardSet = $true
             Write-Output 'PFX の base64 をクリップボードにコピーしました (履歴には残りません)。'
             Write-Output 'GitHub の SIGNING_PFX_BASE64 に貼り付けてから Enter を押してください。'
             [void](Read-Host)
@@ -286,6 +307,9 @@ finally {
     if (-not $success -and $pfxWritten -and (Test-Path -LiteralPath $OutFile)) {
         Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
     }
+    if (-not $success -and $createdFolder -and (Test-Path -LiteralPath $outFolder) -and @(Get-ChildItem -LiteralPath $outFolder -Force).Count -eq 0) {
+        Remove-Item -LiteralPath $outFolder -Force -ErrorAction SilentlyContinue
+    }
     if (-not $success -and $secretMayBeUsed) {
         [Console]::Error.WriteLine('PFX を削除しました。GitHub のシークレットを新しい値に置き換える必要があるため、このスクリプトを再実行してください。')
     }
@@ -302,3 +326,6 @@ if (-not $SkipClipboard) {
     Write-Output 'ドキュメントの「リリース用証明書の拇印」欄に、下の拇印を記入してください。'
 }
 Write-Output ('証明書の拇印: {0}' -f $cert.Thumbprint)
+
+# Explicit success code, see set-version.ps1.
+exit 0

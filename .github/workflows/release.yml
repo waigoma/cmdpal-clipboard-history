@@ -31,7 +31,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:REF_NAME -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$' -or $env:REF_NAME -eq 'v0.0.0') {
+          if ($env:REF_NAME -notmatch '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' -or $env:REF_NAME -eq 'v0.0.0') {
             throw "タグ $env:REF_NAME は vMAJOR.MINOR.PATCH の形式ではありません (先頭に 0 は付けず、v0.0.0 は使えません)。"
           }
           git fetch --no-tags origin '+refs/heads/release:refs/remotes/origin/release'
@@ -124,12 +124,10 @@ jobs:
           $unsigned = @(Get-ChildItem -LiteralPath $release -Filter 'ClipboardHistory_*.msix' -File)
           if ($unsigned.Count -ne 1) {
             Write-Error 'The unsigned package count is not one.'
-            exit 1
           }
           & (Join-Path $release 'sign-release.ps1') -Msix $unsigned[0].FullName -OutDir $dist
           if ($LASTEXITCODE -ne 0) {
             Write-Error 'Release signing failed.'
-            exit 1
           }
           foreach ($name in @('install.ps1', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'Apache-2.0.txt')) {
             Copy-Item -LiteralPath (Join-Path $release $name) -Destination $dist
@@ -158,9 +156,17 @@ jobs:
           $tag = $env:REF_NAME
 
           # A release that is already published is never touched. A draft left by an earlier failed run is replaced.
-          $draftState = gh release view $tag --json isDraft --jq '.isDraft' 2>$null
-          if ($LASTEXITCODE -eq 0) {
-            if ($draftState.Trim() -ne 'true') {
+          # The list is read with its error output kept. An empty list means no release exists; any gh failure stops the run.
+          $listed = @(gh release list --json tagName,isDraft --limit 100 2>&1)
+          if ($LASTEXITCODE -ne 0) {
+            throw ('リリースの一覧を取得できませんでした: ' + ($listed -join ' '))
+          }
+          $releases = @(($listed -join "`n") | ConvertFrom-Json | Where-Object { $_.tagName -eq $tag })
+          if ($releases.Count -gt 1) {
+            throw "タグ $tag のリリースが $($releases.Count) 件あります。手動で確認してください。"
+          }
+          if ($releases.Count -eq 1) {
+            if (-not $releases[0].isDraft) {
               throw "リリース $tag は既に公開されています。公開済みのリリースは変更しません。"
             }
             gh release delete $tag --yes

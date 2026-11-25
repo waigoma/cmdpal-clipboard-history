@@ -21,8 +21,21 @@ $timestampUrl = 'http://timestamp.digicert.com'
 $store = 'Cert:\CurrentUser\My'
 
 $exitCode = 0
+
+# Thumbprints in the store that are not in $Before, plus the ones a PFX import returned. Empty when $Before is unknown.
+function Get-AddedThumbprints {
+    param($Before, [string[]]$Extra)
+    if ($null -eq $Before) {
+        return @()
+    }
+    $now = @(Get-ChildItem -LiteralPath $store | ForEach-Object { $_.Thumbprint })
+    return @(@($now + @($Extra)) | Where-Object { $_ -and ($Before -notcontains $_) } | Sort-Object -Unique)
+}
+
 $pfxPath = $null
 $workPath = $null
+$storeBefore = $null
+$importedThumbprints = $null
 $addedThumbprints = @()
 $cert = $null
 $createdOutDir = $false
@@ -48,7 +61,7 @@ try {
     $securePassword = ConvertTo-SecureString -String $pfxPassword -AsPlainText -Force
     $pfxPassword = $null
 
-    $thumbprintsBefore = @(Get-ChildItem -LiteralPath $store | ForEach-Object { $_.Thumbprint })
+    $storeBefore = @(Get-ChildItem -LiteralPath $store | ForEach-Object { $_.Thumbprint })
     $pfxPath = Join-Path ([System.IO.Path]::GetTempPath()) ('cmdpal-release-{0}.pfx' -f ([guid]::NewGuid().ToString('N')))
     [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($pfxBase64))
     $pfxBase64 = $null
@@ -62,13 +75,10 @@ try {
         $pfxPath = $null
     }
 
-    # Every thumbprint this run added is recorded here, before any check, so the finally block removes all of them,
-    # including certificates that a PFX with several certificates brings along.
-    $thumbprintsAfter = @(Get-ChildItem -LiteralPath $store | ForEach-Object { $_.Thumbprint })
+    # Recorded before any check, so every certificate this run added (also those a PFX with several certificates brings along)
+    # is removed by the finally block. The finally block computes the set again from the store diff.
     $importedThumbprints = @($imported | ForEach-Object { $_.Thumbprint })
-    $addedThumbprints = @(@($thumbprintsAfter + $importedThumbprints) |
-        Where-Object { $thumbprintsBefore -notcontains $_ } |
-        Sort-Object -Unique)
+    $addedThumbprints = @(Get-AddedThumbprints -Before $storeBefore -Extra $importedThumbprints)
 
     $withKey = @($imported | Where-Object { $_.HasPrivateKey })
     if ($withKey.Count -eq 0) {
@@ -170,7 +180,11 @@ finally {
         Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
     }
 
-    # Removal covers every thumbprint recorded above, whatever happened later; a failure to remove one is reported.
+    # The set is computed again from the store diff, so an import that threw half-way is cleaned as well.
+    $addedThumbprints = @(@($addedThumbprints) + @(Get-AddedThumbprints -Before $storeBefore -Extra $importedThumbprints) |
+        Where-Object { $_ } | Sort-Object -Unique)
+
+    # A removal that throws is not an error when the certificate is gone afterwards; only a certificate still present is reported.
     foreach ($thumbprint in $addedThumbprints) {
         $certPath = Join-Path $store $thumbprint
         if (Test-Path -LiteralPath $certPath) {
@@ -178,7 +192,7 @@ finally {
                 Remove-Item -LiteralPath $certPath -DeleteKey -Confirm:$false -ErrorAction Stop
             }
             catch {
-                $exitCode = 1
+                # Checked below: the certificate may already be gone.
             }
         }
         if (Test-Path -LiteralPath $certPath) {
@@ -206,3 +220,6 @@ if ($exitCode -ne 0) {
 }
 
 Write-Output $result
+
+# Explicit success code, see set-version.ps1.
+exit 0

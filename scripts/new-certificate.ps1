@@ -52,3 +52,6 @@ catch {
 }
 
 Write-Output $cert.Thumbprint
+
+# Explicit success code, see set-version.ps1.
+exit 0

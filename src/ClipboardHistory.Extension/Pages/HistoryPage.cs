@@ -46,6 +46,14 @@ internal sealed partial class HistoryPage : DynamicListPage
     private long _lastActive;
     private bool _closed;
 
+    // Set by OnDebounced just before it raises the list, and read by the GetItems that the raise causes. Guarded by _gate.
+    private bool _refreshPending;
+    private string _lastSearch = string.Empty;
+
+    // Built once, so the empty-state item is only reassigned when the state changes.
+    private readonly CommandItem _emptyHistory = new(new NoOpCommand()) { Title = EmptyHistoryTitle };
+    private readonly CommandItem _noResults = new(new NoOpCommand()) { Title = NoResultTitle };
+
     public HistoryPage(AppHost host, EntryItemFactory factory)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
@@ -68,31 +76,46 @@ internal sealed partial class HistoryPage : DynamicListPage
     {
         try
         {
-            _host.NoteActivity();
-
             string filter = _filters.CurrentFilterId ?? HistoryFilters.All;
             string search;
             int visible;
+            bool selfRefresh;
             lock (_gate)
             {
-                long now = Stopwatch.GetTimestamp();
-                if (filter != _lastFilter)
+                // A closed page has nothing to show and must not touch the store or its timers.
+                if (_closed)
                 {
-                    _lastFilter = filter;
-                    _visible = PageSize;
-                }
-                else if (Stopwatch.GetElapsedTime(_lastTouch, now) > PagingResetAfter)
-                {
-                    _visible = PageSize;
+                    return [];
                 }
 
-                _lastTouch = now;
-                _lastActive = now;
                 search = _search;
+
+                // The read that OnDebounced caused is not the user looking at the list, so it must not extend the
+                // active window. Anything the user did since the last read (search, filter, LoadMore) clears the flag.
+                selfRefresh = _refreshPending && filter == _lastFilter && search == _lastSearch;
+                _refreshPending = false;
+                if (!selfRefresh)
+                {
+                    long now = Stopwatch.GetTimestamp();
+                    if (filter != _lastFilter || Stopwatch.GetElapsedTime(_lastTouch, now) > PagingResetAfter)
+                    {
+                        _visible = PageSize;
+                    }
+
+                    _lastTouch = now;
+                    _lastActive = now;
+                }
+
+                _lastFilter = filter;
+                _lastSearch = search;
                 visible = _visible;
             }
 
-            _idleTimer.Change(IdleRelease, Timeout.InfiniteTimeSpan);
+            if (!selfRefresh)
+            {
+                _host.NoteActivity();
+                ArmIdleRelease();
+            }
 
             // One row beyond the page tells whether another page exists, without a separate count query.
             IReadOnlyList<EntrySummary> rows = _host.Store.Query(
@@ -130,7 +153,11 @@ internal sealed partial class HistoryPage : DynamicListPage
                     item = _factory.Create(summary);
                 }
 
-                item.Section = DateSections.Of(summary, localNow);
+                string section = DateSections.Of(summary, localNow);
+                if (item.Section != section)
+                {
+                    item.Section = section;
+                }
                 next[summary.Id] = (summary, item);
                 items.Add(item);
             }
@@ -141,10 +168,11 @@ internal sealed partial class HistoryPage : DynamicListPage
             }
 
             bool unfiltered = string.IsNullOrEmpty(search) && filter == HistoryFilters.All;
-            EmptyContent = new CommandItem(new NoOpCommand())
+            ICommandItem emptyContent = unfiltered ? _emptyHistory : _noResults;
+            if (!ReferenceEquals(EmptyContent, emptyContent))
             {
-                Title = unfiltered ? EmptyHistoryTitle : NoResultTitle,
-            };
+                EmptyContent = emptyContent;
+            }
 
             return items.ToArray();
         }
@@ -159,16 +187,22 @@ internal sealed partial class HistoryPage : DynamicListPage
     {
         try
         {
-            _host.NoteActivity();
             long now = Stopwatch.GetTimestamp();
             lock (_gate)
             {
+                if (_closed)
+                {
+                    return;
+                }
+
                 _visible += PageSize;
                 _lastTouch = now;
                 _lastActive = now;
+                _refreshPending = false;
             }
 
-            _idleTimer.Change(IdleRelease, Timeout.InfiniteTimeSpan);
+            _host.NoteActivity();
+            ArmIdleRelease();
             RaiseItemsChanged(0);
         }
         catch (Exception ex)
@@ -200,12 +234,17 @@ internal sealed partial class HistoryPage : DynamicListPage
     {
         try
         {
+            long now = Stopwatch.GetTimestamp();
             lock (_gate)
             {
                 _search = newSearch;
                 _visible = PageSize;
+                _lastTouch = now;
+                _lastActive = now;
+                _refreshPending = false;
             }
 
+            _host.NoteActivity();
             RaiseItemsChanged(0);
         }
         catch (Exception ex)
@@ -288,6 +327,11 @@ internal sealed partial class HistoryPage : DynamicListPage
                 {
                     _cache = new();
                 }
+                else
+                {
+                    // Set under the gate just before the raise, so the GetItems it causes is recognised as the page's own.
+                    _refreshPending = true;
+                }
             }
 
             if (active)
@@ -298,6 +342,18 @@ internal sealed partial class HistoryPage : DynamicListPage
         catch (Exception ex)
         {
             Log.Error("HistoryPage.OnDebounced", ex);
+        }
+    }
+
+    // Re-arming races with Close, which disposes the timer. That race is expected and must stay quiet.
+    private void ArmIdleRelease()
+    {
+        try
+        {
+            _idleTimer.Change(IdleRelease, Timeout.InfiniteTimeSpan);
+        }
+        catch (ObjectDisposedException)
+        {
         }
     }
 

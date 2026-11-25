@@ -57,9 +57,8 @@ internal static class EntryDetailsBuilder
 
     internal static string ImageMarkdown(string pngPath)
     {
-        // Parentheses end the markdown image target early, so they are percent-encoded in the URI.
-        string uri = new Uri(pngPath).AbsoluteUri.Replace("(", "%28", StringComparison.Ordinal).Replace(")", "%29", StringComparison.Ordinal);
-        return $"![{ImageAlt}]({uri}?--x-cmdpal-fit=fit&--x-cmdpal-maxheight={ImageMaxHeight})";
+        string target = FileUri.ToMarkdownTarget(pngPath);
+        return $"![{ImageAlt}]({target}?--x-cmdpal-fit=fit&--x-cmdpal-maxheight={ImageMaxHeight})";
     }
 
     internal static string FormatSize(long bytes)

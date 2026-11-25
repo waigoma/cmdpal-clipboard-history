@@ -19,7 +19,8 @@ internal sealed class EntryItemFactory
     private const string ImageGlyph = "";
     private const string FilesGlyph = "";
 
-    private const string ColorSwatch = "■";
+    // One ideographic space: the tag is then a solid block in the colour, because both its text and its background use it.
+    private const string ColorBlock = "　";
 
     private readonly AppHost _host;
 
@@ -115,10 +116,12 @@ internal sealed class EntryItemFactory
 
         if (e.Kind == EntryKind.Color && ColorParser.TryParse(e.Preview, out Rgba rgba))
         {
+            var swatch = new OptionalColor(true, new Color(rgba.R, rgba.G, rgba.B, 255));
             tags.Add(new Tag
             {
-                Text = ColorSwatch,
-                Foreground = new OptionalColor(true, new Color(rgba.R, rgba.G, rgba.B, 255)),
+                Text = ColorBlock,
+                Background = swatch,
+                Foreground = swatch,
             });
         }
 
@@ -137,6 +140,13 @@ internal sealed class EntryItemFactory
         {
             string? first = EntryDetailsBuilder.PathsOf(_host.Store.Get(e.Id)?.Body).FirstOrDefault();
             if (string.IsNullOrEmpty(first) || first.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            // A mapped network drive is probed as a UNC path under the hood, so it is skipped like one.
+            string? root = Path.GetPathRoot(first);
+            if (string.IsNullOrEmpty(root) || new DriveInfo(root).DriveType == DriveType.Network)
             {
                 return false;
             }

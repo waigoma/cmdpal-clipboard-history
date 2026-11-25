@@ -39,10 +39,14 @@ public sealed class HistoryService : IDisposable
     private volatile bool _paused;
 
     // The heartbeat read at construction is the backfill window. A capture before Startup must not move that window,
-    // or copies made while the app was closed would be hidden.
-    private readonly DateTimeOffset? _backfillSince;
+    // or copies made while the app was closed would be hidden. When this instance has not recorded anything yet,
+    // Startup re-reads the stored heartbeat, because another instance may have advanced it since construction.
+    private DateTimeOffset? _backfillSince;
 
     private long? _heartbeatMs;
+
+    // Set by the first heartbeat this instance writes. Until then the stored value is authoritative.
+    private bool _heartbeatWritten;
     private long _ticks;
 
     public HistoryService(HistoryStore store, Func<HistoryOptions> options, Func<ClipboardSnapshot?> read, IBackfillSource backfill,
@@ -86,6 +90,8 @@ public sealed class HistoryService : IDisposable
     public void Startup()
     {
         // Order matters: the heartbeat is written last, so the backfill window is never moved past copies it still needs.
+        RefreshBackfillWindowIfUnwritten();
+
         // A heartbeat that is a day or more old may just mean the boot clock is wrong, so retention waits for the hourly Tick.
         bool expireNow = !ClockLooksWrongSinceHeartbeat();
         Guarded("HistoryService.Startup.ResetRunning", () => _store.Jobs.ResetRunning());
@@ -344,6 +350,24 @@ public sealed class HistoryService : IDisposable
         _store.SweepFiles(SweepMinAge);
     }
 
+    // Runs at the start of Startup. Once this instance has written its own heartbeat, the window stays as it was at construction.
+    private void RefreshBackfillWindowIfUnwritten()
+    {
+        lock (_heartbeatGate)
+        {
+            if (_heartbeatWritten)
+            {
+                return;
+            }
+
+            if (ReadStoredHeartbeat() is { } stored)
+            {
+                _backfillSince = stored;
+                _heartbeatMs = stored.ToUnixTimeMilliseconds();
+            }
+        }
+    }
+
     private bool ClockLooksWrongSinceHeartbeat() =>
         _backfillSince is { } since && _clock.GetUtcNow() - since > TimeSpan.FromDays(1);
 
@@ -380,6 +404,17 @@ public sealed class HistoryService : IDisposable
         lock (_heartbeatGate)
         {
             long ms = at.ToUnixTimeMilliseconds();
+            if (!_heartbeatWritten)
+            {
+                // The first write compares with what is stored, which another instance may have advanced already.
+                if (ReadStoredHeartbeat() is { } storedNow && storedNow.ToUnixTimeMilliseconds() > ms)
+                {
+                    ms = storedNow.ToUnixTimeMilliseconds();
+                }
+
+                _heartbeatWritten = true;
+            }
+
             if (_heartbeatMs is { } stored && stored > ms)
             {
                 ms = stored;

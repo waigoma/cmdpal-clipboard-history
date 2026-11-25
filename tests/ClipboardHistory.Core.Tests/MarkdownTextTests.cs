@@ -100,6 +100,12 @@ public sealed class MarkdownTextTests
     }
 
     [Fact]
+    public void Fence_MaxCharsAtIntMaxValue_DoesNotOverflow()
+    {
+        Assert.Equal("```text\nabc\n```", MarkdownText.Fence("abc", int.MaxValue));
+    }
+
+    [Fact]
     public void Fence_CountsTheLimitAfterLineBreaksAreNormalised()
     {
         // The raw prefix is shorter than the normalised text here, so the limit must be checked on the normalised text.

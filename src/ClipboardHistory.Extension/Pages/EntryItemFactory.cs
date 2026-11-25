@@ -138,7 +138,8 @@ internal sealed class EntryItemFactory
     {
         try
         {
-            string? first = EntryDetailsBuilder.PathsOf(_host.Store.Get(e.Id)?.Body).FirstOrDefault();
+            // Only the first path is needed, so the body is cut in the store rather than read whole.
+            string? first = EntryDetailsBuilder.PathsOf(_host.Store.GetForDisplay(e.Id, EntryDetailsBuilder.TextLimit)?.Body).FirstOrDefault();
             if (string.IsNullOrEmpty(first) || first.StartsWith(@"\\", StringComparison.Ordinal))
             {
                 return false;

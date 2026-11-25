@@ -180,10 +180,12 @@ public sealed partial class HistoryStore
             using WriteTransaction transaction = _db.BeginWrite();
             // The total is read once and then tracked by subtraction, so the loop costs one scan per deleted row.
             long total = Convert.ToInt64(ScalarValue("SELECT COALESCE(SUM(byte_size), 0) FROM entries"), CultureInfo.InvariantCulture);
-            // Pins that alone reach the limit cannot be satisfied by trimming, so nothing is removed in that case.
+            // The newest row is never removed, so the smallest total trimming can reach is the pins plus the newest row.
+            // When even that is over the limit, trimming would only empty the list, so nothing is removed.
             long pinnedBytes = Convert.ToInt64(
                 ScalarValue("SELECT COALESCE(SUM(byte_size), 0) FROM entries WHERE pinned = 1"), CultureInfo.InvariantCulture);
-            while (pinnedBytes < maxBytes && total > maxBytes)
+            long floorBytes = pinnedBytes + NewestUnpinnedBytes();
+            while (floorBytes <= maxBytes && total > maxBytes)
             {
                 (long Id, long ByteSize)? oldest = ReadOldestUnpinned();
                 if (oldest is not { } row)
@@ -274,6 +276,20 @@ public sealed partial class HistoryStore
             NullableString(reader, 2),
             reader.GetInt64(3) != 0,
             reader.GetInt64(4));
+    }
+
+    // Zero when the newest row is pinned, because its bytes are already counted in the pins.
+    private long NewestUnpinnedBytes()
+    {
+        using SqliteCommand command = _db.Command(
+            "SELECT byte_size, pinned FROM entries ORDER BY last_copied_at DESC, id DESC LIMIT 1");
+        using SqliteDataReader reader = command.ExecuteReader();
+        if (!reader.Read() || reader.GetInt64(1) != 0)
+        {
+            return 0;
+        }
+
+        return reader.GetInt64(0);
     }
 
     // The newest row is excluded so a copy the user has just made is never trimmed, even when it alone exceeds the limit.

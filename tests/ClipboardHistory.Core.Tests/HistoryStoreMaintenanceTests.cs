@@ -136,17 +136,35 @@ public sealed class HistoryStoreMaintenanceTests
     }
 
     [Fact]
-    public void EnforceTotalLimit_NewestRowOverLimitAlone_Survives()
+    public void EnforceTotalLimit_NewestRowOverLimitAlone_DeletesNothing()
     {
+        // Trimming the other rows could never bring the total under the limit, so they are kept.
         using var temp = new TempStore();
         using var store = new HistoryStore(temp.Paths, new FakeClock());
         long older = AddText(store, new string('a', 100), T0 - TimeSpan.FromMinutes(2));
         long huge = AddText(store, new string('b', 500), T0 - TimeSpan.FromMinutes(1));
 
-        Assert.Equal(1, store.EnforceTotalLimit(250));
+        Assert.Equal(0, store.EnforceTotalLimit(250));
 
-        Assert.False(store.Exists(older));
+        Assert.True(store.Exists(older));
         Assert.True(store.Exists(huge));
+    }
+
+    [Fact]
+    public void EnforceTotalLimit_PinnedPlusNewestOverLimit_DeletesNothing_EvenWithOtherUnpinnedRows()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long pinned = AddText(store, new string('p', 100), T0 - TimeSpan.FromMinutes(5));
+        store.SetPinned(pinned, true);
+        long older = AddText(store, new string('o', 50), T0 - TimeSpan.FromMinutes(2));
+        long newest = AddText(store, new string('n', 300), T0 - TimeSpan.FromMinutes(1));
+
+        Assert.Equal(0, store.EnforceTotalLimit(250));
+
+        Assert.True(store.Exists(older));
+        Assert.True(store.Exists(newest));
+        Assert.Equal(450, store.TotalBytes());
     }
 
     [Fact]

@@ -173,7 +173,8 @@ public static class PayloadFactory
             return true;
         }
 
-        return File.Exists(path) || Directory.Exists(path) || IsNetworkDrive(path);
+        // The network check comes first: touching a path on an offline share can block for a long time.
+        return IsNetworkDrive(path) || File.Exists(path) || Directory.Exists(path);
     }
 
     private static bool IsNetworkDrive(string path)

@@ -24,7 +24,8 @@ public static class MarkdownText
         ArgumentOutOfRangeException.ThrowIfNegative(maxChars);
 
         // Normalising stops after maxChars + 1 characters, so a multi-megabyte body costs no more than the limit.
-        string text = Normalize(body, maxChars + 1);
+        // The sum is clamped, because maxChars + 1 would overflow for int.MaxValue.
+        string text = Normalize(body, (int)Math.Min((long)maxChars + 1, int.MaxValue));
         string content = text;
         if (text.Length > maxChars)
         {
@@ -80,7 +81,7 @@ public static class MarkdownText
     // Stops once the result is longer than limit, so the caller can tell the text is over the limit without reading the rest.
     private static string Normalize(string body, int limit)
     {
-        var sb = new StringBuilder(Math.Min(body.Length, limit + 1));
+        var sb = new StringBuilder(Math.Min(body.Length, limit));
         for (int i = 0; i < body.Length && sb.Length <= limit; i++)
         {
             char c = body[i];

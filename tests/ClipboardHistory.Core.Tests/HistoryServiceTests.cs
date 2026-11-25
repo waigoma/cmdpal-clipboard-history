@@ -66,6 +66,23 @@ public sealed class HistoryServiceTests
     }
 
     [Fact]
+    public void Startup_HeartbeatAdvancedByAnotherInstanceAfterConstruction_UsesTheNewerWindow()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromHours(1)));
+        using HistoryService service = f.Create();
+        // Another instance records the heartbeat later, as a second process would.
+        using (HistoryService other = f.Create())
+        {
+        }
+        f.Backfill.Items.Add(new BackfillItem("copied before the other instance ran", null, T0 - TimeSpan.FromMinutes(30)));
+
+        service.Startup();
+
+        Assert.Equal(0, f.Rows());
+    }
+
+    [Fact]
     public void PausedCopy_ThenUncleanExit_DoesNotBackfillThatCopy()
     {
         using var f = new ServiceFixture();

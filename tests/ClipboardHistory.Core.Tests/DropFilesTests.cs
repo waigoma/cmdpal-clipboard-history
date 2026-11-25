@@ -55,4 +55,44 @@ public sealed class DropFilesTests
     {
         Assert.Empty(DropFiles.Decode(new byte[10]));
     }
+
+    [Fact]
+    public void Decode_OffsetBelowHeaderSize_ReturnsEmpty()
+    {
+        byte[] data = DropFiles.Encode(new[] { @"C:\a.txt" });
+        BitConverter.GetBytes(4u).CopyTo(data, 0);
+
+        Assert.Empty(DropFiles.Decode(data));
+    }
+
+    [Fact]
+    public void Decode_OffsetBeyondData_ReturnsEmpty()
+    {
+        byte[] data = DropFiles.Encode(new[] { @"C:\a.txt" });
+        BitConverter.GetBytes((uint)data.Length + 1).CopyTo(data, 0);
+
+        Assert.Empty(DropFiles.Decode(data));
+    }
+
+    [Fact]
+    public void Decode_OddByteCount_IgnoresTheStrayByte()
+    {
+        byte[] complete = DropFiles.Encode(new[] { @"C:\a.txt", @"C:\b.txt" });
+        byte[] withStray = complete.Append((byte)0x41).ToArray();
+
+        Assert.Equal(new[] { @"C:\a.txt", @"C:\b.txt" }, DropFiles.Decode(withStray));
+    }
+
+    [Fact]
+    public void Decode_TruncatedAnsiList_ReturnsEmpty()
+    {
+        var data = new List<byte>();
+        data.AddRange(BitConverter.GetBytes(20u));
+        data.AddRange(new byte[8]);
+        data.AddRange(BitConverter.GetBytes(0u));
+        data.AddRange(BitConverter.GetBytes(0u));
+        data.AddRange(Encoding.ASCII.GetBytes(@"C:\a.txt" + "\0" + @"D:\b.txt" + "\0"));
+
+        Assert.Empty(DropFiles.Decode(data.ToArray()));
+    }
 }

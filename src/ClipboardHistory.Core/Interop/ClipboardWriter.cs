@@ -189,6 +189,8 @@ public sealed class ClipboardWriter : IClipboardWriter
     private static unsafe nint ReadFileToGlobal(string path, out uint firstWord)
     {
         firstWord = 0;
+        nint handle = 0;
+        bool succeeded = false;
         try
         {
             using SafeFileHandle file = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.SequentialScan);
@@ -198,7 +200,7 @@ public sealed class ClipboardWriter : IClipboardWriter
                 return 0;
             }
 
-            nint handle = Native.GlobalAlloc(Native.GMEM_MOVEABLE, (nuint)length);
+            handle = Native.GlobalAlloc(Native.GMEM_MOVEABLE, (nuint)length);
             if (handle == 0)
             {
                 return 0;
@@ -207,18 +209,18 @@ public sealed class ClipboardWriter : IClipboardWriter
             nint pointer = Native.GlobalLock(handle);
             if (pointer == 0)
             {
-                Native.GlobalFree(handle);
                 return 0;
             }
 
             bool complete;
+            uint first = 0;
             try
             {
                 Span<byte> target = new((void*)pointer, (int)length);
                 complete = ReadAll(file, target);
                 if (complete && target.Length >= sizeof(uint))
                 {
-                    firstWord = BitConverter.ToUInt32(target[..sizeof(uint)]);
+                    first = BitConverter.ToUInt32(target[..sizeof(uint)]);
                 }
             }
             finally
@@ -228,10 +230,11 @@ public sealed class ClipboardWriter : IClipboardWriter
 
             if (!complete)
             {
-                Native.GlobalFree(handle);
                 return 0;
             }
 
+            firstWord = first;
+            succeeded = true;
             return handle;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
@@ -239,6 +242,14 @@ public sealed class ClipboardWriter : IClipboardWriter
             // The path itself is left out of the log: it can name a private file.
             Log.Info("clipboard.write file-unreadable");
             return 0;
+        }
+        finally
+        {
+            // Any exit that does not hand the block over (including an unexpected exception) frees it here.
+            if (!succeeded && handle != 0)
+            {
+                Native.GlobalFree(handle);
+            }
         }
     }
 

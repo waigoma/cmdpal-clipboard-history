@@ -1,3 +1,4 @@
+using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Waigoma.ClipboardHistory.Capture;
 
@@ -16,6 +17,12 @@ public sealed class ClipboardReader
     private const int OpenAttempts = 10;
     private const int OpenRetryMs = 20;
 
+    // Keeps the 2x text bound and the managed array sizes below int.MaxValue.
+    private const long MaxFormatBytesLimit = int.MaxValue - 64;
+
+    private const int PngChunkOverhead = 12;
+    private static readonly byte[] PngSignature = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+
     private readonly Func<nint> _owner;
     private readonly Func<string?> _foregroundExe;
 
@@ -25,8 +32,21 @@ public sealed class ClipboardReader
         _foregroundExe = foregroundExe;
     }
 
-    // Returns null when the clipboard stays locked by another process. The caller then drops this change.
+    // Returns null when the clipboard stays locked by another process, or when reading fails. The caller then drops this change.
     public ClipboardSnapshot? Read(long maxFormatBytes)
+    {
+        try
+        {
+            return ReadCore(Math.Clamp(maxFormatBytes, 0, MaxFormatBytesLimit));
+        }
+        catch (Exception ex)
+        {
+            Log.Error("clipboard.read", ex);
+            return null;
+        }
+    }
+
+    private ClipboardSnapshot? ReadCore(long maxFormatBytes)
     {
         nint clipboardOwner = Native.GetClipboardOwner();
         string? source = clipboardOwner == 0 ? null : ProcessInfo.ImagePathOf(ProcessInfo.PidOf(clipboardOwner));
@@ -42,11 +62,6 @@ public sealed class ClipboardReader
         try
         {
             return ReadOpened(maxFormatBytes, source);
-        }
-        catch (Exception ex)
-        {
-            Log.Error("clipboard.read", ex);
-            return null;
         }
         finally
         {
@@ -168,7 +183,9 @@ public sealed class ClipboardReader
     {
         if (FindNamed(formats, FormatNames.Png) is { } png && ReadFormat(png, maxFormatBytes) is { } pngData)
         {
-            return new ClipFormat(FormatNames.Png, pngData);
+            // Some producers append slack after IEND; dropping it lets the same picture hash identically.
+            int length = PngLength(pngData);
+            return new ClipFormat(FormatNames.Png, length == pngData.Length ? pngData : pngData[..length]);
         }
 
         foreach (FormatEntry entry in formats)
@@ -185,6 +202,44 @@ public sealed class ClipboardReader
         }
 
         return null;
+    }
+
+    // Walks the PNG chunks up to and including IEND. An invalid or unexpected structure returns the full length,
+    // so the picture is kept whole rather than cut at a guessed point.
+    internal static int PngLength(ReadOnlySpan<byte> data)
+    {
+        if (data.Length < PngSignature.Length || !data[..PngSignature.Length].SequenceEqual(PngSignature))
+        {
+            return data.Length;
+        }
+
+        int position = PngSignature.Length;
+        while (true)
+        {
+            if (data.Length - position < PngChunkOverhead)
+            {
+                return data.Length;
+            }
+
+            uint length = BinaryPrimitives.ReadUInt32BigEndian(data.Slice(position, 4));
+            if (length > int.MaxValue)
+            {
+                return data.Length;
+            }
+
+            long end = position + (long)PngChunkOverhead + length;
+            if (end > data.Length)
+            {
+                return data.Length;
+            }
+
+            if (data.Slice(position + 4, 4).SequenceEqual("IEND"u8))
+            {
+                return (int)end;
+            }
+
+            position = (int)end;
+        }
     }
 
     private static void AddFormat(List<ClipFormat> target, List<FormatEntry> formats, string name, long maxFormatBytes,
@@ -305,18 +360,27 @@ public sealed class ClipboardReader
     // that a Store app's frame is hosting. Without it the source would be reported as ApplicationFrameHost.
     private static unsafe string? ResolveFrameHostChild(string? source)
     {
-        if (source is null || !Path.GetFileNameWithoutExtension(source).Equals(FrameHostProcess, StringComparison.OrdinalIgnoreCase))
+        if (source is null || !IsFrameHost(source))
         {
             return source;
         }
 
+        // Children are only trusted when the foreground window is really the frame host; otherwise the frame
+        // host path stays the source, because a child of some other window says nothing about the copy.
         nint foreground = Native.GetForegroundWindow();
         if (foreground == 0)
         {
             return source;
         }
 
-        var search = new ChildSearch { FrameHostPid = ProcessInfo.PidOf(foreground) };
+        uint hostPid = ProcessInfo.PidOf(foreground);
+        string? foregroundExe = ProcessInfo.ImagePathOf(hostPid);
+        if (foregroundExe is null || !IsFrameHost(foregroundExe))
+        {
+            return source;
+        }
+
+        var search = new ChildSearch { FrameHostPid = hostPid };
         GCHandle handle = GCHandle.Alloc(search);
         try
         {
@@ -329,6 +393,9 @@ public sealed class ClipboardReader
 
         return search.Pid == 0 ? source : ProcessInfo.ImagePathOf(search.Pid) ?? source;
     }
+
+    private static bool IsFrameHost(string path) =>
+        Path.GetFileNameWithoutExtension(path).Equals(FrameHostProcess, StringComparison.OrdinalIgnoreCase);
 
     [UnmanagedCallersOnly]
     private static int EnumChildCallback(nint hwnd, nint lParam)

@@ -42,6 +42,11 @@ public sealed unsafe class ClipboardMonitor : IDisposable
     {
         lock (LiveGate)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                throw new ObjectDisposedException(nameof(ClipboardMonitor));
+            }
+
             if (_started)
             {
                 throw new InvalidOperationException("ClipboardMonitor is already started.");
@@ -58,7 +63,16 @@ public sealed unsafe class ClipboardMonitor : IDisposable
 
         _thread = new Thread(ThreadEntry) { IsBackground = true, Name = "ClipboardHistory.Monitor" };
         _thread.SetApartmentState(ApartmentState.STA);
-        _thread.Start();
+        try
+        {
+            _thread.Start();
+        }
+        catch
+        {
+            // The thread never ran, so nothing else will clear the static reference.
+            ReleaseLive();
+            throw;
+        }
 
         if (!_ready.Wait(StartTimeoutMs) || WindowHandle == 0)
         {
@@ -70,6 +84,11 @@ public sealed unsafe class ClipboardMonitor : IDisposable
     // Runs the action on the STA thread. Safe to call from any thread.
     public void Post(Action action)
     {
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return;
+        }
+
         _queue.Enqueue(action);
         nint window = WindowHandle;
         if (window != 0)
@@ -92,13 +111,13 @@ public sealed unsafe class ClipboardMonitor : IDisposable
         }
 
         // Joining from the monitor thread would wait on itself, so the close message alone is enough there.
+        // The static reference is cleared by the thread itself once it has released the window, so a timed-out
+        // join leaves it in place for the close message still in flight.
         Thread? thread = _thread;
         if (thread is not null && thread != Thread.CurrentThread && thread.IsAlive)
         {
             thread.Join(JoinTimeoutMs);
         }
-
-        ReleaseLive();
     }
 
     private void ThreadEntry()
@@ -146,7 +165,9 @@ public sealed unsafe class ClipboardMonitor : IDisposable
 
         Volatile.Write(ref _window, window);
 
-        // Dispose may have run before the window was published, and then it could not post the close itself.
+        // Dispose sets _disposed before reading _window. The full fence orders this write before the read below,
+        // so at least one side sees the other and the close message is never lost.
+        Interlocked.MemoryBarrier();
         if (Volatile.Read(ref _disposed) != 0)
         {
             Native.PostMessageW(window, Native.WM_CLOSE, 0, 0);
@@ -206,6 +227,7 @@ public sealed unsafe class ClipboardMonitor : IDisposable
 
         Native.RemoveClipboardFormatListener(window);
         Native.DestroyWindow(window);
+        Volatile.Write(ref _window, 0);
     }
 
     private void DrainQueue()

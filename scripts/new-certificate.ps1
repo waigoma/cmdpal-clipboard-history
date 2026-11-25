@@ -15,8 +15,9 @@ try {
     $now = Get-Date
 
     # Reusing the certificate keeps the package signer stable across builds, so an installed version stays updatable.
+    # A certificate close to expiry is not reused, so a fresh one is made before the signer stops being valid.
     $existing = Get-ChildItem -LiteralPath $store |
-        Where-Object { $_.Subject -eq $subject -and $_.FriendlyName -eq $friendlyName -and $_.NotAfter -gt $now } |
+        Where-Object { $_.Subject -eq $subject -and $_.FriendlyName -eq $friendlyName -and $_.NotAfter -gt $now.AddDays(30) } |
         Sort-Object -Property NotAfter -Descending |
         Select-Object -First 1
 

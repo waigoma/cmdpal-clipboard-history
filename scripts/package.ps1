@@ -10,6 +10,8 @@ $buildScript = Join-Path $PSScriptRoot 'build.ps1'
 $certScript = Join-Path $PSScriptRoot 'new-certificate.ps1'
 $exeName = 'ClipboardHistory.Extension.exe'
 $minExeBytes = 5MB
+# Set once the signing copy exists, so the catch block can remove it when a step fails.
+$workPath = $null
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 
@@ -74,7 +76,9 @@ try {
         throw "ビルドに失敗しました (終了コード $LASTEXITCODE)。"
     }
 
+    # Only the Release x64 output or the x64 AppPackages folder counts, so a stale package from another configuration is never signed.
     $unsigned = Get-ChildItem -LiteralPath $projectDir -Recurse -Filter '*.msix' -File |
+        Where-Object { $_.FullName -match '\\bin\\x64\\Release\\' -or $_.FullName -match '\\AppPackages\\[^\\]*_x64[^\\]*\\[^\\]*\.msix$' } |
         Sort-Object -Property LastWriteTime -Descending |
         Select-Object -First 1
     if ($null -eq $unsigned) {
@@ -86,12 +90,12 @@ try {
         throw '.msix に AppxManifest.xml または実行ファイルが含まれていません。'
     }
 
-    # Older packages are removed so artifacts\ never holds two versions that look equally current.
     New-Item -ItemType Directory -Force -Path $artifacts | Out-Null
-    Get-ChildItem -LiteralPath $artifacts -Filter '*.msix' -File | Remove-Item -Force
-
     $msixPath = Join-Path $artifacts ('ClipboardHistory_{0}_x64.msix' -f $unsignedInfo.Version)
-    Copy-Item -LiteralPath $unsigned.FullName -Destination $msixPath -Force
+
+    # Signing happens under a temp name, so a failure never leaves an unsigned or half-signed package under the final name.
+    $workPath = Join-Path $artifacts ('signing-{0}.msix' -f ([guid]::NewGuid().ToString('N')))
+    Copy-Item -LiteralPath $unsigned.FullName -Destination $workPath -Force
 
     Write-Output '署名用の証明書を準備しています...'
     $certOutput = @(& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $certScript)
@@ -113,23 +117,31 @@ try {
     Write-Output ('署名ツール: {0}' -f $signtool)
 
     # No /tr or /td: a timestamp server would be a network call, and the package does not need one to install.
-    & $signtool sign /fd SHA256 /sha1 $thumbprint $msixPath | Out-Host
+    & $signtool sign /fd SHA256 /sha1 $thumbprint $workPath | Out-Host
     if ($LASTEXITCODE -ne 0) {
         throw "署名に失敗しました (終了コード $LASTEXITCODE)。"
     }
 
-    $signature = Get-AuthenticodeSignature -LiteralPath $msixPath
+    $signature = Get-AuthenticodeSignature -LiteralPath $workPath
     if ($null -eq $signature.SignerCertificate -or $signature.SignerCertificate.Thumbprint -ne $thumbprint) {
         throw '署名者の証明書が指定したものと一致しません。'
     }
     Write-Output ('署名の状態: {0} (証明書をまだ信頼していないため、NotTrusted や UnknownError は想定どおりです)' -f $signature.Status)
 
-    $signedInfo = Read-MsixInfo -Path $msixPath
+    $signedInfo = Read-MsixInfo -Path $workPath
     if ($null -eq $signedInfo -or $signedInfo.ExeBytes -le $minExeBytes) {
         throw ('署名済みの .msix の {0} が 5 MB を超えていません。AOT のビルドを確認してください。' -f $exeName)
     }
+
+    # Every check has passed, so the previous packages are replaced only now and the failed runs never touch them.
+    Get-ChildItem -LiteralPath $artifacts -Filter 'ClipboardHistory_*.msix' -File | Remove-Item -Force
+    Move-Item -LiteralPath $workPath -Destination $msixPath -Force
+    $workPath = $null
 }
 catch {
+    if ($null -ne $workPath -and (Test-Path -LiteralPath $workPath)) {
+        Remove-Item -LiteralPath $workPath -Force
+    }
     [Console]::Error.WriteLine(('パッケージの作成に失敗しました: {0}' -f $_.Exception.Message))
     exit 1
 }

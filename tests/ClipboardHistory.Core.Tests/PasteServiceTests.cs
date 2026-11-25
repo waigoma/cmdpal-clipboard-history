@@ -156,6 +156,40 @@ public sealed class PasteServiceTests
     }
 
     [Fact]
+    public void ModifierPressedOnlyDuringSettle_IsModifiersHeldAndDoesNotSend()
+    {
+        var h = new Harness();
+        h.Windows.Foreground = Target;
+        h.Windows.LastTarget = Target;
+        // Released during the initial wait, pressed again exactly when the 50 ms settle ends.
+        h.Windows.ModifierDownFromMs = 50;
+        h.Windows.ModifierDownUntilMs = 60_000;
+
+        PasteOutcome? outcome = null;
+        h.Service.Begin(Sample, false, o => outcome = o);
+
+        Assert.Equal(PasteOutcome.ModifiersHeld, outcome);
+        Assert.Empty(h.Windows.SendTimes);
+    }
+
+    [Fact]
+    public void HotkeyForegroundChangedDuringModifierWait_IsFocusTimeoutAndDoesNotSend()
+    {
+        var h = new Harness();
+        h.Windows.Pids[Target] = 100;
+        h.Windows.Pids[Other] = 200;
+        h.Windows.Foreground = Target;
+        h.Windows.ModifierDownUntilMs = 60_000;
+        h.Delay.At(300, () => h.Windows.Foreground = Other);
+
+        PasteOutcome? outcome = null;
+        h.Service.Begin(Sample, true, o => outcome = o);
+
+        Assert.Equal(PasteOutcome.FocusTimeout, outcome);
+        Assert.Empty(h.Windows.SendTimes);
+    }
+
+    [Fact]
     public void Hotkey_UsesForegroundAtCallTime_WithoutFocusWait()
     {
         var h = new Harness();
@@ -432,6 +466,8 @@ public sealed class PasteServiceTests
 
         public HashSet<nint> CommandPalettes { get; } = new();
 
+        public long ModifierDownFromMs { get; set; }
+
         public long ModifierDownUntilMs { get; set; }
 
         public bool SendResult { get; set; } = true;
@@ -446,7 +482,7 @@ public sealed class PasteServiceTests
 
         public bool IsElevatedOrUnknown(nint hwnd) => hwnd == 0 || Elevated.Contains(hwnd);
 
-        public bool AnyModifierDown() => _delay.NowMs < ModifierDownUntilMs;
+        public bool AnyModifierDown() => _delay.NowMs >= ModifierDownFromMs && _delay.NowMs < ModifierDownUntilMs;
 
         public bool SendCtrlV()
         {

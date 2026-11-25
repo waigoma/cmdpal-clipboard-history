@@ -25,7 +25,8 @@ public sealed class SequentialPaste
         lock (_gate)
         {
             DateTimeOffset now = _clock.GetUtcNow();
-            if (_ids is null || now - _lastActivity > _timeout())
+            // An empty list is reloaded on the next Peek, so history copied after an empty start is still reached.
+            if (_ids is null || _ids.Count == 0 || now - _lastActivity > _timeout())
             {
                 // Copied, because the caller's list may be a live view that keeps changing.
                 _ids = loadIds().ToArray();

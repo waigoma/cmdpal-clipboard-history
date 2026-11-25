@@ -74,6 +74,17 @@ public sealed class SequentialPasteTests
     }
 
     [Fact]
+    public void EmptyLoad_IsNotKeptAsASession_NextPeekReloads()
+    {
+        var clock = new FakeClock();
+        var sequence = new SequentialPaste(clock, () => OneMinute);
+        long[] ids = { 3, 2, 1 };
+
+        Assert.Null(sequence.Peek(() => Array.Empty<long>(), _ => true));
+        Assert.Equal(3, sequence.Peek(() => ids, _ => true));
+    }
+
+    [Fact]
     public void Timeout_ExactlyOneMinuteAfterAdvance_Continues()
     {
         var clock = new FakeClock();

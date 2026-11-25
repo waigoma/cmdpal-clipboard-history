@@ -1,0 +1,183 @@
+using Microsoft.Data.Sqlite;
+
+namespace Waigoma.ClipboardHistory.Store;
+
+public sealed record Job(long EntryId, int Attempts);
+
+// The worker is a separate process, so a claim is one UPDATE ... RETURNING that the database applies atomically.
+public sealed class JobQueue
+{
+    private const int MaxAttempts = 3;
+
+    private const int StatePending = 0;
+    private const int StateRunning = 1;
+    private const int StateFailed = 2;
+
+    private readonly Database _db;
+    private readonly Action _onEntryFailed;
+
+    internal JobQueue(Database db, Action onEntryFailed)
+    {
+        _db = db;
+        _onEntryFailed = onEntryFailed;
+    }
+
+    public void Enqueue(long entryId)
+    {
+        lock (_db.Gate)
+        {
+            using WriteTransaction transaction = _db.BeginWrite();
+            EnqueueCore(_db, entryId);
+            transaction.Commit();
+        }
+    }
+
+    // Shared with HistoryStore.Upsert, which must enqueue inside its own transaction.
+    internal static void EnqueueCore(Database db, long entryId)
+    {
+        // A re-enqueue starts the job over, so an image copied again is not stuck behind old failures.
+        using SqliteCommand command = db.Command(
+            "INSERT INTO jobs(entry_id, attempts, state) VALUES(@id, 0, 0) ON CONFLICT(entry_id) DO UPDATE SET attempts = 0, state = 0",
+            ("@id", entryId));
+        command.ExecuteNonQuery();
+    }
+
+    // Only jobs with an id above afterId are considered, so a caller that passes the last id it claimed visits
+    // each job at most once per pass, even when a failed job goes back to pending.
+    public Job? Claim(long afterId = 0)
+    {
+        lock (_db.Gate)
+        {
+            using WriteTransaction transaction = _db.BeginWrite();
+            Job? job;
+            using (SqliteCommand command = _db.Command(
+                "UPDATE jobs SET state = 1 WHERE entry_id = (SELECT entry_id FROM jobs WHERE state = @pending AND entry_id > @after ORDER BY entry_id LIMIT 1) RETURNING entry_id, attempts",
+                ("@pending", StatePending), ("@after", afterId)))
+            using (SqliteDataReader reader = command.ExecuteReader())
+            {
+                job = reader.Read() ? new Job(reader.GetInt64(0), reader.GetInt32(1)) : null;
+            }
+
+            transaction.Commit();
+            return job;
+        }
+    }
+
+    public void Complete(long entryId)
+    {
+        lock (_db.Gate)
+        {
+            using WriteTransaction transaction = _db.BeginWrite();
+            using (SqliteCommand command = _db.Command("DELETE FROM jobs WHERE entry_id = @id", ("@id", entryId)))
+            {
+                command.ExecuteNonQuery();
+            }
+
+            transaction.Commit();
+        }
+    }
+
+    public void Fail(long entryId)
+    {
+        bool failed = false;
+        lock (_db.Gate)
+        {
+            using WriteTransaction transaction = _db.BeginWrite();
+            long? state = null;
+            using (SqliteCommand command = _db.Command(
+                "UPDATE jobs SET attempts = attempts + 1, state = CASE WHEN attempts + 1 >= @max THEN @failed ELSE @pending END WHERE entry_id = @id RETURNING state",
+                ("@max", MaxAttempts), ("@failed", StateFailed), ("@pending", StatePending), ("@id", entryId)))
+            using (SqliteDataReader reader = command.ExecuteReader())
+            {
+                if (reader.Read())
+                {
+                    state = reader.GetInt64(0);
+                }
+            }
+
+            if (state is null)
+            {
+                // The job was completed or never existed, so there is nothing to record.
+                return;
+            }
+
+            if (state == StateFailed)
+            {
+                MarkImageFailed(entryId);
+                failed = true;
+            }
+
+            transaction.Commit();
+        }
+
+        // Raised after the lock is released, so a handler that reads the store cannot deadlock.
+        if (failed)
+        {
+            _onEntryFailed();
+        }
+    }
+
+    // A running job that was interrupted (for example by a worker crash) counts as one failed attempt.
+    // Returns the number of jobs that were running.
+    public int ResetRunning()
+    {
+        bool failed = false;
+        int count = 0;
+        lock (_db.Gate)
+        {
+            using WriteTransaction transaction = _db.BeginWrite();
+            var exhausted = new List<long>();
+            using (SqliteCommand command = _db.Command(
+                "UPDATE jobs SET attempts = attempts + 1, state = CASE WHEN attempts + 1 >= @max THEN @failed ELSE @pending END " +
+                "WHERE state = @running RETURNING entry_id, state",
+                ("@max", MaxAttempts), ("@failed", StateFailed), ("@pending", StatePending), ("@running", StateRunning)))
+            using (SqliteDataReader reader = command.ExecuteReader())
+            {
+                // The reader is drained before any other command runs on the shared connection.
+                while (reader.Read())
+                {
+                    count++;
+                    if (reader.GetInt64(1) == StateFailed)
+                    {
+                        exhausted.Add(reader.GetInt64(0));
+                    }
+                }
+            }
+
+            foreach (long entryId in exhausted)
+            {
+                MarkImageFailed(entryId);
+            }
+
+            failed = exhausted.Count > 0;
+            transaction.Commit();
+        }
+
+        if (failed)
+        {
+            _onEntryFailed();
+        }
+
+        return count;
+    }
+
+    // A Done image is a result that already exists, so a later failure must not replace it.
+    private void MarkImageFailed(long entryId)
+    {
+        using SqliteCommand mark = _db.Command(
+            "UPDATE entries SET image_state = @failed WHERE id = @id AND image_state <> @done",
+            ("@failed", (long)ImageState.Failed), ("@done", (long)ImageState.Done), ("@id", entryId));
+        mark.ExecuteNonQuery();
+    }
+
+    public bool HasPending()
+    {
+        lock (_db.Gate)
+        {
+            using SqliteCommand command = _db.Command(
+                "SELECT EXISTS(SELECT 1 FROM jobs WHERE state = @pending)",
+                ("@pending", StatePending));
+            return Convert.ToInt64(command.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture) != 0;
+        }
+    }
+}

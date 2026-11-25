@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite.Core" />
+    <PackageReference Include="SQLitePCLRaw.bundle_winsqlite3" />
+    <PackageReference Include="ZXing.Net" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Lets the tests reach the one internal helper that models a file vanishing mid-save. -->
+    <InternalsVisibleTo Include="ClipboardHistory.Core.Tests" />
+  </ItemGroup>
+</Project>

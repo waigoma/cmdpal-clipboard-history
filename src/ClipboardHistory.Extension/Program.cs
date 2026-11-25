@@ -24,7 +24,8 @@ internal static class Program
     [MTAThread]
     public static int Main(string[] args)
     {
-        if (args.Length == 1 && args[0] == ComServerArgument)
+        // COM activation appends -Embedding after the registered argument, so the rest of the list is ignored here.
+        if (args.Length >= 1 && string.Equals(args[0], ComServerArgument, StringComparison.OrdinalIgnoreCase))
         {
             return RunComServer();
         }

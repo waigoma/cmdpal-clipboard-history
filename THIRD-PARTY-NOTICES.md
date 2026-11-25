@@ -19,6 +19,7 @@ Notes:
 
 - The Apache-2.0 components are licensed under the Apache License, Version 2.0. The full text is in `licenses/Apache-2.0.txt`, which is also included in the package.
 - SQLite itself is not redistributed. The database uses the `winsqlite3` copy that ships with Windows, so no SQLite binary is part of the package.
+- The extension's executable is built with Native AOT. It contains .NET runtime native components (the runtime and the garbage collector, for example) that are covered by the .NET notices: https://github.com/dotnet/runtime/blob/main/THIRD-PARTY-NOTICES.TXT
 
 ## Project template
 

@@ -12,12 +12,13 @@ $repoRoot = Split-Path -Parent $PSScriptRoot
 $manifestPath = Join-Path $repoRoot 'src\ClipboardHistory.Extension\Package.appxmanifest'
 
 try {
-    if (-not ($Version -match '^(\d+)\.(\d+)\.(\d+)$')) {
-        throw 'バージョンは x.y.z の形式で指定してください (例: 0.2.0)。'
+    # No leading zeros (0 itself is fine), so each tag has exactly one spelling; 0.0.0 is not a release.
+    if (-not ($Version -match '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$') -or $Version -eq '0.0.0') {
+        throw 'バージョンは 0.0.0 以外の x.y.z の形式で指定してください (先頭に 0 は付けません。例: 0.2.0)。'
     }
     $parts = @($Matches[1], $Matches[2], $Matches[3])
     foreach ($part in $parts) {
-        if ([int]$part -gt 65535) {
+        if ([long]$part -gt 65535) {
             throw 'バージョンの各部分は 0 から 65535 の範囲にしてください。'
         }
     }

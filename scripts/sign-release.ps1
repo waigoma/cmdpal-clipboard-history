@@ -1,8 +1,8 @@
 ﻿# Signs an unsigned MSIX with the release certificate, which is taken from the environment variables SIGNING_PFX_BASE64 and
 # SIGNING_PFX_PASSWORD (set as GitHub Environment secrets in the release workflow). Writes the signed package
-# ClipboardHistory_<version>_x64.msix and the public certificate waigoma.cer to -OutDir. The certificate and its key are
-# removed from the current user store when this run imported them. Nothing secret is printed or written to disk.
-# Prints the signed package path as the last line. Exits non-zero on failure and leaves no partial files behind.
+# ClipboardHistory_<version>_x64.msix and the public certificate waigoma.cer to -OutDir. Every certificate that this run
+# added to the current user store is removed again, together with its private key. Nothing secret is printed or written
+# to disk. Prints the signed package path as the last line. Exits non-zero on failure and leaves no partial files behind.
 # -NoTimestamp is for a local trial only: a release is always timestamped.
 param(
     [Parameter(Mandatory)][string]$Msix,
@@ -23,7 +23,7 @@ $store = 'Cert:\CurrentUser\My'
 $exitCode = 0
 $pfxPath = $null
 $workPath = $null
-$importedThumbprint = $null
+$addedThumbprints = @()
 $cert = $null
 $createdOutDir = $false
 $finalMsix = $null
@@ -44,7 +44,7 @@ try {
         throw '.msix に AppxManifest.xml または実行ファイルが含まれていません。'
     }
 
-    # The certificate is taken as a SecureString and the plain password variable is cleared straight away.
+    # The password is taken as a SecureString and the plain variable is cleared straight away.
     $securePassword = ConvertTo-SecureString -String $pfxPassword -AsPlainText -Force
     $pfxPassword = $null
 
@@ -62,18 +62,23 @@ try {
         $pfxPath = $null
     }
 
-    $cert = @($imported | Where-Object { $_.HasPrivateKey })[0]
-    if ($null -eq $cert) {
+    # Every thumbprint this run added is recorded here, before any check, so the finally block removes all of them,
+    # including certificates that a PFX with several certificates brings along.
+    $thumbprintsAfter = @(Get-ChildItem -LiteralPath $store | ForEach-Object { $_.Thumbprint })
+    $importedThumbprints = @($imported | ForEach-Object { $_.Thumbprint })
+    $addedThumbprints = @(@($thumbprintsAfter + $importedThumbprints) |
+        Where-Object { $thumbprintsBefore -notcontains $_ } |
+        Sort-Object -Unique)
+
+    $withKey = @($imported | Where-Object { $_.HasPrivateKey })
+    if ($withKey.Count -eq 0) {
         throw '取り込んだ証明書に秘密鍵がありません。'
     }
-    # Only a certificate that this run added may be removed again; a thumbprint that was already there is left alone.
-    if ($thumbprintsBefore -notcontains $cert.Thumbprint) {
-        $importedThumbprint = $cert.Thumbprint
+    $matching = @($withKey | Where-Object { $_.Subject -ceq $info.Publisher })
+    if ($matching.Count -ne 1) {
+        throw ('秘密鍵を持ち、Subject が .msix の Publisher と一致する証明書が 1 つではありません (Publisher: {0})。' -f $info.Publisher)
     }
-
-    if ($cert.Subject -cne $info.Publisher) {
-        throw ('証明書の Subject が .msix の Publisher と一致しません (Publisher: {0}, Subject: {1})。' -f $info.Publisher, $cert.Subject)
-    }
+    $cert = $matching[0]
 
     $ekuExtension = @($cert.Extensions | Where-Object { $_ -is [System.Security.Cryptography.X509Certificates.X509EnhancedKeyUsageExtension] })
     $ekuValues = @()
@@ -117,7 +122,7 @@ try {
             $signed = $true
         }
         elseif ($attempt -lt $attempts) {
-            Write-Output ('署名に失敗しました。タイムスタンプ サーバーの再試行します ({0}/{1})。' -f ($attempt + 1), $attempts)
+            Write-Output ('署名に失敗しました。タイムスタンプ サーバーを再試行します ({0}/{1})。' -f ($attempt + 1), $attempts)
             Start-Sleep -Seconds 5
         }
     }
@@ -150,7 +155,7 @@ try {
     Export-Certificate -Cert $cert -FilePath $cerPath -Force | Out-Null
 
     $result = $finalMsix
-    Write-Output ('署名者の証明書の指紋: {0}' -f $cert.Thumbprint)
+    Write-Output ('署名者の証明書の拇印: {0}' -f $cert.Thumbprint)
     Write-Output ('公開証明書: {0}' -f $cerPath)
 }
 catch {
@@ -165,15 +170,19 @@ finally {
         Remove-Item -LiteralPath $pfxPath -Force -ErrorAction SilentlyContinue
     }
 
-    if ($null -ne $importedThumbprint) {
-        try {
-            Remove-Item -LiteralPath (Join-Path $store $importedThumbprint) -DeleteKey -Confirm:$false -ErrorAction Stop
-            if (Test-Path -LiteralPath (Join-Path $store $importedThumbprint)) {
-                throw '証明書がまだ残っています。'
+    # Removal covers every thumbprint recorded above, whatever happened later; a failure to remove one is reported.
+    foreach ($thumbprint in $addedThumbprints) {
+        $certPath = Join-Path $store $thumbprint
+        if (Test-Path -LiteralPath $certPath) {
+            try {
+                Remove-Item -LiteralPath $certPath -DeleteKey -Confirm:$false -ErrorAction Stop
+            }
+            catch {
+                $exitCode = 1
             }
         }
-        catch {
-            [Console]::Error.WriteLine(('この実行で取り込んだ証明書を削除できませんでした。手動で {0} の証明書と秘密鍵を削除してください。' -f $importedThumbprint))
+        if (Test-Path -LiteralPath $certPath) {
+            [Console]::Error.WriteLine(('この実行で取り込んだ証明書を削除できませんでした。手動で {0} の証明書と秘密鍵を削除してください。' -f $thumbprint))
             $exitCode = 1
         }
     }

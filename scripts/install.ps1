@@ -2,7 +2,8 @@
 # import certificates, toggle Developer Mode or change any store. When the signing certificate is not trusted it prints
 # the exact elevated command for the user to run and exits 1. Runs from any current directory.
 # Release download: when a ClipboardHistory_*.msix lies next to this script, that folder supplies the package and
-# waigoma.cer. Otherwise the repository's artifacts folder is used (development build).
+# waigoma.cer, and no path in the repository is computed. Otherwise the repository's artifacts folder is used.
+# Among several packages, the one with the highest version (from its file name) is chosen.
 param(
     [string]$Msix,
     [switch]$RemoveDevelopment
@@ -11,22 +12,47 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $packageName = 'waigoma.CmdPal.ClipboardHistory'
-$repoRoot = Split-Path -Parent $PSScriptRoot
-$artifacts = Join-Path $repoRoot 'artifacts'
 
-$releaseMode = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter 'ClipboardHistory_*.msix' -File -ErrorAction SilentlyContinue).Count -gt 0
-$baseDir = if ($releaseMode) { $PSScriptRoot } else { $artifacts }
-$certPath = Join-Path $baseDir 'waigoma.cer'
+# Returns the package in the folder with the highest version parsed from its name, or $null when there is none.
+function Select-ClipboardPackage {
+    param([Parameter(Mandatory)][string]$Folder)
+    $candidates = foreach ($file in @(Get-ChildItem -LiteralPath $Folder -Filter 'ClipboardHistory_*_x64.msix' -File -ErrorAction SilentlyContinue)) {
+        if ($file.Name -match '^ClipboardHistory_(\d+\.\d+\.\d+\.\d+)_x64\.msix$') {
+            [pscustomobject]@{ File = $file; Version = [version]$Matches[1] }
+        }
+    }
+    $best = @($candidates) | Sort-Object -Property Version -Descending | Select-Object -First 1
+    if ($null -eq $best) {
+        return $null
+    }
+    return $best.File
+}
 
 try {
+    $releasePackage = Select-ClipboardPackage -Folder $PSScriptRoot
+    $releaseMode = $null -ne $releasePackage
+    if ($releaseMode) {
+        $baseDir = $PSScriptRoot
+    }
+    else {
+        # A script at the top of a drive has no parent folder, so there is no repository to read from.
+        $repoRoot = Split-Path -Parent $PSScriptRoot
+        if ([string]::IsNullOrEmpty($repoRoot)) {
+            throw 'ドライブのルートに置かれたスクリプトからは、リポジトリの artifacts を読めません。リポジトリ内の scripts フォルダーから実行してください。'
+        }
+        $baseDir = Join-Path $repoRoot 'artifacts'
+    }
+    $certPath = Join-Path $baseDir 'waigoma.cer'
+
     if ([string]::IsNullOrEmpty($Msix)) {
-        $newest = Get-ChildItem -LiteralPath $baseDir -Filter 'ClipboardHistory_*.msix' -File -ErrorAction SilentlyContinue |
-            Sort-Object -Property LastWriteTime -Descending |
-            Select-Object -First 1
-        if ($null -eq $newest) {
+        $selected = Select-ClipboardPackage -Folder $baseDir
+        if ($null -eq $selected) {
+            if ($releaseMode) {
+                throw '.msix が見つかりません。配布物を取得し直してください。'
+            }
             throw 'artifacts に .msix がありません。先に scripts\package.ps1 を実行してください。'
         }
-        $Msix = $newest.FullName
+        $Msix = $selected.FullName
     }
 
     $msixPath = (Resolve-Path -LiteralPath $Msix).ProviderPath

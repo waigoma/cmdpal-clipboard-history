@@ -15,6 +15,7 @@ jobs:
   build:
     name: Test and build the unsigned package
     runs-on: windows-2025
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -30,8 +31,8 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
-          if ($env:REF_NAME -notmatch '^v\d+\.\d+\.\d+$') {
-            throw "タグ $env:REF_NAME は vMAJOR.MINOR.PATCH の形式ではありません。"
+          if ($env:REF_NAME -notmatch '^v(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$' -or $env:REF_NAME -eq 'v0.0.0') {
+            throw "タグ $env:REF_NAME は vMAJOR.MINOR.PATCH の形式ではありません (先頭に 0 は付けず、v0.0.0 は使えません)。"
           }
           git fetch --no-tags origin '+refs/heads/release:refs/remotes/origin/release'
           if ($LASTEXITCODE -ne 0) {
@@ -51,20 +52,21 @@ jobs:
         run: dotnet test tests/ClipboardHistory.Core.Tests -c Release --filter "Category!=Performance"
 
       - name: Set the package version from the tag
-        shell: pwsh
+        shell: powershell
         env:
           REF_NAME: ${{ github.ref_name }}
         run: |
           $ErrorActionPreference = 'Stop'
           $version = $env:REF_NAME.Substring(1)
           & .\scripts\set-version.ps1 -Version $version
-          if ($LASTEXITCODE -ne 0) {
-            throw "バージョン $version を設定できませんでした。"
-          }
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Build the package
         shell: powershell
-        run: scripts\build.ps1
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\build.ps1
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Stage the release files
         shell: pwsh
@@ -98,6 +100,7 @@ jobs:
     name: Sign and publish the release
     needs: build
     runs-on: windows-2025
+    timeout-minutes: 30
     environment: release
     permissions:
       contents: write
@@ -108,8 +111,9 @@ jobs:
           name: unsigned
           path: release
 
+      # Windows PowerShell 5.1 reads a run block without a byte order mark as ANSI, so this block stays ASCII only.
       - name: Sign the package
-        shell: pwsh
+        shell: powershell
         env:
           SIGNING_PFX_BASE64: ${{ secrets.SIGNING_PFX_BASE64 }}
           SIGNING_PFX_PASSWORD: ${{ secrets.SIGNING_PFX_PASSWORD }}
@@ -119,13 +123,15 @@ jobs:
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
           $unsigned = @(Get-ChildItem -LiteralPath $release -Filter 'ClipboardHistory_*.msix' -File)
           if ($unsigned.Count -ne 1) {
-            throw "署名対象の .msix が 1 つだけありません (現在 $($unsigned.Count) 個)。"
+            Write-Error 'The unsigned package count is not one.'
+            exit 1
           }
           & (Join-Path $release 'sign-release.ps1') -Msix $unsigned[0].FullName -OutDir $dist
           if ($LASTEXITCODE -ne 0) {
-            throw 'リリース署名に失敗しました。'
+            Write-Error 'Release signing failed.'
+            exit 1
           }
-          foreach ($name in 'install.ps1', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'Apache-2.0.txt') {
+          foreach ($name in @('install.ps1', 'LICENSE', 'THIRD-PARTY-NOTICES.md', 'Apache-2.0.txt')) {
             Copy-Item -LiteralPath (Join-Path $release $name) -Destination $dist
           }
 
@@ -134,12 +140,13 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
-          $lines = foreach ($file in Get-ChildItem -LiteralPath $dist -File | Sort-Object -Property Name) {
+          $lines = @(foreach ($file in Get-ChildItem -LiteralPath $dist -File | Sort-Object -Property Name) {
             '{0}  {1}' -f (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $file.Name
-          }
-          [System.IO.File]::WriteAllLines((Join-Path $dist 'SHA256SUMS.txt'), [string[]]@($lines), (New-Object System.Text.UTF8Encoding($false)))
+          })
+          $text = (($lines -join "`n") + "`n")
+          [System.IO.File]::WriteAllText((Join-Path $dist 'SHA256SUMS.txt'), $text, (New-Object System.Text.UTF8Encoding($false)))
 
-      - name: Create the GitHub release
+      - name: Create the draft release, then publish it
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -150,9 +157,16 @@ jobs:
           $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
           $tag = $env:REF_NAME
 
-          gh release view $tag *> $null
+          # A release that is already published is never touched. A draft left by an earlier failed run is replaced.
+          $draftState = gh release view $tag --json isDraft --jq '.isDraft' 2>$null
           if ($LASTEXITCODE -eq 0) {
-            throw "リリース $tag は既に存在します。既存のリリースは変更しません。"
+            if ($draftState.Trim() -ne 'true') {
+              throw "リリース $tag は既に公開されています。公開済みのリリースは変更しません。"
+            }
+            gh release delete $tag --yes
+            if ($LASTEXITCODE -ne 0) {
+              throw "下書きのリリース $tag を削除できませんでした。"
+            }
           }
 
           $msix = Get-ChildItem -LiteralPath $dist -Filter 'ClipboardHistory_*.msix' -File | Select-Object -First 1
@@ -173,13 +187,17 @@ jobs:
 
           ## 署名証明書
 
-          - 指紋 (SHA-1): $thumbprint
+          - 拇印 (SHA-1): $thumbprint
           - この証明書は自己署名で、認証局による証明ではありません。手順 3 を実行すると、この PC で waigoma 名義の署名を信頼することになります。信頼したくない場合は、リポジトリのソースからビルドしてください。
           "@
           [System.IO.File]::WriteAllText($notesPath, $notes, (New-Object System.Text.UTF8Encoding($false)))
 
           $assets = @(Get-ChildItem -LiteralPath $dist -File | ForEach-Object { $_.FullName })
-          gh release create $tag --verify-tag --title "ClipboardHistory $tag" --notes-file $notesPath @assets
+          gh release create $tag --draft --verify-tag --title "ClipboardHistory $tag" --notes-file $notesPath @assets
           if ($LASTEXITCODE -ne 0) {
-            throw "リリース $tag の作成に失敗しました。"
+            throw "リリース $tag の下書きを作成できませんでした。"
+          }
+          gh release edit $tag --draft=false
+          if ($LASTEXITCODE -ne 0) {
+            throw "リリース $tag を公開できませんでした。下書きのまま残っています。"
           }

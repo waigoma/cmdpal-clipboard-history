@@ -1,8 +1,8 @@
 ﻿# Run once by the owner. Creates the release signing certificate (CN=waigoma, 5 years, exportable), exports it to a
-# password-protected PFX (-OutFile, default Documents\waigoma-signing\release.pfx), removes the certificate and its key
-# from the current user store, and then hands the base64 of the PFX and its password to the clipboard one at a time
-# for the GitHub Environment secrets. Clipboard entries are marked so Windows clipboard history, cloud clipboard and this
-# extension do not record them. Nothing secret is printed or written anywhere except the PFX itself.
+# password-protected PFX (-OutFile, default %LOCALAPPDATA%\waigoma-signing\release.pfx, readable by the current user only),
+# removes the certificate and its key from the current user store, and then hands the password and the base64 of the PFX
+# to the clipboard one at a time for the GitHub Environment secrets. The clipboard entries are marked so that Windows
+# clipboard history and cloud clipboard do not keep them; third-party clipboard managers may ignore that marking.
 # -SkipClipboard is for a local trial: the clipboard is not touched and the PFX is deleted again at the end.
 # Prints the thumbprint as the last line. Exits non-zero on failure.
 param(
@@ -25,6 +25,98 @@ $cert = $null
 $password = $null
 $pfxWritten = $false
 $clipboardSet = $false
+$secretMayBeUsed = $false
+
+# Resolves junctions, symbolic links and 8.3 names to the final path. The path must exist.
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public static class PathResolver {
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    static extern uint GetFinalPathNameByHandleW(IntPtr handle, StringBuilder path, uint length, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool CloseHandle(IntPtr handle);
+
+    public static string Resolve(string path) {
+        const uint OpenExisting = 3;
+        const uint BackupSemantics = 0x02000000;
+        IntPtr handle = CreateFileW(path, 0, 7, IntPtr.Zero, OpenExisting, BackupSemantics, IntPtr.Zero);
+        if (handle == new IntPtr(-1)) {
+            throw new Win32Exception(Marshal.GetLastWin32Error());
+        }
+        try {
+            StringBuilder buffer = new StringBuilder(4096);
+            uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
+            if (length == 0 || length >= buffer.Capacity) {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+            string result = buffer.ToString();
+            if (result.StartsWith(@"\\?\UNC\", StringComparison.Ordinal)) {
+                return @"\\" + result.Substring(8);
+            }
+            if (result.StartsWith(@"\\?\", StringComparison.Ordinal)) {
+                return result.Substring(4);
+            }
+            return result;
+        }
+        finally {
+            CloseHandle(handle);
+        }
+    }
+}
+'@
+
+# Returns the real path of a path that may not exist yet: the nearest existing ancestor is resolved, the rest is appended.
+function Get-RealPath {
+    param([Parameter(Mandatory)][string]$Path)
+    $current = [System.IO.Path]::GetFullPath($Path).TrimEnd('\')
+    $missing = New-Object System.Collections.Generic.List[string]
+    while (-not (Test-Path -LiteralPath $current)) {
+        $parent = [System.IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrEmpty($parent) -or $parent -eq $current) {
+            break
+        }
+        $missing.Insert(0, [System.IO.Path]::GetFileName($current))
+        $current = $parent
+    }
+    $real = [PathResolver]::Resolve($current)
+    foreach ($part in $missing) {
+        $real = Join-Path $real $part
+    }
+    return $real.TrimEnd('\')
+}
+
+function Test-IsSameOrUnder {
+    param([string]$Child, [string]$Parent)
+    if ($Child -ieq $Parent) {
+        return $true
+    }
+    return $Child.StartsWith($Parent.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# Leaves the PFX readable by the current user only: no inherited entries, one full control entry.
+function Set-CurrentUserOnlyAcl {
+    param([Parameter(Mandatory)][string]$Path)
+    $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $acl = Get-Acl -LiteralPath $Path
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($rule in @($acl.Access)) {
+        [void]$acl.RemoveAccessRule($rule)
+    }
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $sid,
+        [System.Security.AccessControl.FileSystemRights]::FullControl,
+        [System.Security.AccessControl.AccessControlType]::Allow)
+    $acl.AddAccessRule($rule)
+    Set-Acl -LiteralPath $Path -AclObject $acl
+}
 
 # Writes text to the clipboard with formats that tell the clipboard history, cloud sync and this extension not to keep it.
 function Set-SecretClipboard {
@@ -61,14 +153,23 @@ try {
     }
 
     if ([string]::IsNullOrEmpty($OutFile)) {
-        $OutFile = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'waigoma-signing\release.pfx'
+        $OutFile = Join-Path $env:LOCALAPPDATA 'waigoma-signing\release.pfx'
     }
     $OutFile = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutFile)
 
-    # The PFX holds the private key of the release signer, so it must never end up in the repository, and an existing file is not overwritten.
-    $repoFull = [System.IO.Path]::GetFullPath($repoRoot).TrimEnd('\') + '\'
-    if ($OutFile.StartsWith($repoFull, [System.StringComparison]::OrdinalIgnoreCase)) {
+    # The real path (after junctions, links and 8.3 names) decides the checks, so a path that merely looks outside is refused too.
+    $realOut = Get-RealPath -Path $OutFile
+    $realRepo = Get-RealPath -Path $repoRoot
+    if (Test-IsSameOrUnder -Child $realOut -Parent $realRepo) {
         throw 'リポジトリの中には PFX を出力できません。別のフォルダーを指定してください。'
+    }
+    foreach ($variable in 'OneDrive', 'OneDriveConsumer', 'OneDriveCommercial') {
+        $root = [Environment]::GetEnvironmentVariable($variable)
+        if (-not [string]::IsNullOrEmpty($root) -and (Test-Path -LiteralPath $root)) {
+            if (Test-IsSameOrUnder -Child $realOut -Parent (Get-RealPath -Path $root)) {
+                throw 'OneDrive の同期フォルダーには PFX を出力できません。別のフォルダーを指定してください。'
+            }
+        }
     }
     if (Test-Path -LiteralPath $OutFile) {
         throw '出力先に同名のファイルがあります。上書きしません。別のパスを指定するか、そのファイルを移動してください。'
@@ -106,8 +207,9 @@ try {
     }
 
     $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
-    Export-PfxCertificate -Cert $cert -FilePath $OutFile -Password $securePassword | Out-Null
+    Export-PfxCertificate -Cert $cert -FilePath $OutFile -Password $securePassword -CryptoAlgorithmOption AES256_SHA256 | Out-Null
     $pfxWritten = $true
+    Set-CurrentUserOnlyAcl -Path $OutFile
 
     # Once the PFX is written, the store copy is no longer needed; it is removed together with its private key.
     Remove-Item -LiteralPath (Join-Path $store $cert.Thumbprint) -DeleteKey -Confirm:$false -ErrorAction Stop
@@ -121,22 +223,32 @@ try {
         Write-Output 'テスト用のため、PFX は削除しました。クリップボードは使用していません。'
     }
     else {
-        $pfxBytes = [System.IO.File]::ReadAllBytes($OutFile)
-        $pfxBase64 = [System.Convert]::ToBase64String($pfxBytes)
-        $pfxBytes = $null
-
         Add-Type -AssemblyName System.Windows.Forms
-        Write-Output ''
-        Write-Output 'PFX の base64 をクリップボードにコピーしました (履歴には残りません)。'
-        Write-Output 'GitHub の SIGNING_PFX_BASE64 に貼り付けたら、このウィンドウで Enter を押してください。'
-        Set-SecretClipboard -Text $pfxBase64
-        $clipboardSet = $true
-        $pfxBase64 = $null
-        [void](Read-Host)
+        $pfxBase64 = [System.Convert]::ToBase64String([System.IO.File]::ReadAllBytes($OutFile))
 
-        Set-SecretClipboard -Text $password
-        Write-Output 'パスワードをクリップボードにコピーしました。SIGNING_PFX_PASSWORD に貼り付けたら Enter を押してください。'
-        [void](Read-Host)
+        # The password comes first: it exists only in memory, so it must be stored before anything else happens.
+        $confirmed = $false
+        while (-not $confirmed) {
+            $secretMayBeUsed = $true
+            Set-SecretClipboard -Text $password
+            Write-Output 'パスワードをクリップボードにコピーしました。'
+            Write-Output 'パスワードマネージャーに今すぐ保存し、GitHub の SIGNING_PFX_PASSWORD にも貼り付けてから Enter を押してください。'
+            [void](Read-Host)
+
+            Set-SecretClipboard -Text $pfxBase64
+            $clipboardSet = $true
+            Write-Output 'PFX の base64 をクリップボードにコピーしました (履歴には残りません)。'
+            Write-Output 'GitHub の SIGNING_PFX_BASE64 に貼り付けてから Enter を押してください。'
+            [void](Read-Host)
+
+            $answer = Read-Host 'パスワードマネージャーのエントリーと両方のシークレットを保存しましたか。保存済みなら y を入力してください'
+            if ($answer -ceq 'y') {
+                $confirmed = $true
+            }
+            else {
+                Write-Output 'まだ保存が確認できないため、コピーを繰り返します。'
+            }
+        }
 
         [System.Windows.Forms.Clipboard]::Clear()
         $clipboardSet = $false
@@ -174,6 +286,9 @@ finally {
     if (-not $success -and $pfxWritten -and (Test-Path -LiteralPath $OutFile)) {
         Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue
     }
+    if (-not $success -and $secretMayBeUsed) {
+        [Console]::Error.WriteLine('PFX を削除しました。GitHub のシークレットを新しい値に置き換える必要があるため、このスクリプトを再実行してください。')
+    }
 }
 
 if (-not $success -or $exitCode -ne 0) {
@@ -184,5 +299,6 @@ Write-Output ''
 if (-not $SkipClipboard) {
     Write-Output 'PFX とパスワードは、パスワードマネージャーに保管してください。紛失すると、利用者は新しい証明書を信頼し直す必要があります。'
     Write-Output 'GitHub の Settings > Environments > release に、次の 2 つのシークレットを登録してください: SIGNING_PFX_BASE64, SIGNING_PFX_PASSWORD'
+    Write-Output 'ドキュメントの「リリース用証明書の拇印」欄に、下の拇印を記入してください。'
 }
-Write-Output ('証明書の指紋: {0}' -f $cert.Thumbprint)
+Write-Output ('証明書の拇印: {0}' -f $cert.Thumbprint)

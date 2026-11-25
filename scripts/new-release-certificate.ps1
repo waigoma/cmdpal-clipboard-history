@@ -110,7 +110,15 @@ function Test-IsSameOrUnder {
 function Set-CurrentUserOnlyAcl {
     param([Parameter(Mandatory)][string]$Path, [switch]$Container)
     $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
-    $acl = Get-Acl -LiteralPath $Path
+    # Only the DACL (Access section) is read and written. Set-Acl writes the whole descriptor, and after an export it
+    # needs SeSecurityPrivilege, which an ordinary user does not hold.
+    $section = [System.Security.AccessControl.AccessControlSections]::Access
+    if ($Container) {
+        $acl = [System.IO.Directory]::GetAccessControl($Path, $section)
+    }
+    else {
+        $acl = [System.IO.File]::GetAccessControl($Path, $section)
+    }
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($rule in @($acl.Access)) {
         [void]$acl.RemoveAccessRule($rule)
@@ -126,7 +134,12 @@ function Set-CurrentUserOnlyAcl {
         [System.Security.AccessControl.PropagationFlags]::None,
         [System.Security.AccessControl.AccessControlType]::Allow)
     $acl.AddAccessRule($rule)
-    Set-Acl -LiteralPath $Path -AclObject $acl
+    if ($Container) {
+        [System.IO.Directory]::SetAccessControl($Path, $acl)
+    }
+    else {
+        [System.IO.File]::SetAccessControl($Path, $acl)
+    }
 }
 
 # Writes text to the clipboard with formats that tell the clipboard history, cloud sync and this extension not to keep it.
@@ -230,6 +243,8 @@ try {
 
     $securePassword = ConvertTo-SecureString -String $password -AsPlainText -Force
     Export-PfxCertificate -Cert $cert -FilePath $OutFile -Password $securePassword -CryptoAlgorithmOption AES256_SHA256 -Force | Out-Null
+    # The export cmdlet may recreate the file, so the owner-only ACL is applied again to the finished file.
+    Set-CurrentUserOnlyAcl -Path $OutFile
 
     # Once the PFX is written, the store copy is no longer needed; it is removed together with its private key.
     Remove-Item -LiteralPath (Join-Path $store $cert.Thumbprint) -DeleteKey -Confirm:$false -ErrorAction Stop

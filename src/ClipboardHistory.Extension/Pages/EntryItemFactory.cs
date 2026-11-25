@@ -171,11 +171,18 @@ internal sealed partial class HistoryListItem : ListItem
     public HistoryListItem(ICommand command, EntrySummary summary, AppHost host)
         : base(command)
     {
-        _details = new Lazy<IDetails>(() => EntryDetailsBuilder.Build(host, summary));
+        // PublicationOnly: a build that throws is not cached, so the next access tries again instead of keeping a failure.
+        // Build turns its own read failure into a title-only pane, which would be cached. The read is done here first, so a
+        // failure throws out of the factory and is not cached.
+        _details = new Lazy<IDetails>(() =>
+        {
+            host.Store.Get(summary.Id);
+            return EntryDetailsBuilder.Build(host, summary);
+        }, LazyThreadSafetyMode.PublicationOnly);
 
         // The menu reads the entry once when it is first needed. The first more-command is Ctrl+Enter, so the
         // shortcuts also depend on it, and it is built on the first selection rather than per row.
-        _moreCommands = new Lazy<IContextItem[]>(() => EntryCommands.MoreCommands(host, summary));
+        _moreCommands = new Lazy<IContextItem[]>(() => EntryCommands.MoreCommands(host, summary), LazyThreadSafetyMode.PublicationOnly);
     }
 
     // The setter is ignored for the same reason as Details: the actions always come from the store and the summary.

@@ -74,6 +74,7 @@ internal sealed partial class HistoryPage : DynamicListPage
         _debounceTimer = new Timer(_ => OnDebounced(), null, Timeout.Infinite, Timeout.Infinite);
         _idleTimer = new Timer(_ => ReleaseCache(), null, Timeout.Infinite, Timeout.Infinite);
         _host.Store.Changed += OnStoreChanged;
+        _host.Settings.Changed += OnSettingsChanged;
     }
 
     public override IListItem[] GetItems()
@@ -290,6 +291,7 @@ internal sealed partial class HistoryPage : DynamicListPage
             }
 
             _host.Store.Changed -= OnStoreChanged;
+            _host.Settings.Changed -= OnSettingsChanged;
             _debounceTimer.Dispose();
             _idleTimer.Dispose();
         }
@@ -349,6 +351,35 @@ internal sealed partial class HistoryPage : DynamicListPage
         catch (Exception ex)
         {
             Log.Error("HistoryPage.OnDebounced", ex);
+        }
+    }
+
+    // A changed setting can change what the rows show (the primary action, for one). Rows are rebuilt from the cache
+    // on the next read, and the list is asked to read again now when somebody is looking at it.
+    private void OnSettingsChanged()
+    {
+        try
+        {
+            bool active;
+            lock (_gate)
+            {
+                if (_closed)
+                {
+                    return;
+                }
+
+                _cache = new();
+                active = Stopwatch.GetElapsedTime(_lastActive) <= ActiveWindow;
+            }
+
+            if (active)
+            {
+                RaiseItemsChanged(0);
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error("HistoryPage.OnSettingsChanged", ex);
         }
     }
 

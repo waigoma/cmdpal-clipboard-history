@@ -25,6 +25,15 @@ public sealed class NewlinesTests
         Assert.Equal(expected, Newlines.MatchOriginal(edited, original));
     }
 
+    [Theory]
+    [InlineData("a\r\nb\rc\n", "a\nb\nc\n")]
+    [InlineData("plain", "plain")]
+    [InlineData("", "")]
+    public void Normalize_ReducesEveryBreakToLf(string text, string expected)
+    {
+        Assert.Equal(expected, Newlines.Normalize(text));
+    }
+
     [Fact]
     public void EmptyAndSingleLine_AreUnchanged()
     {

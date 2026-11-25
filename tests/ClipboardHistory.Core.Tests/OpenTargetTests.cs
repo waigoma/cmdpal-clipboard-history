@@ -31,14 +31,12 @@ public sealed class OpenTargetTests : IDisposable
     }
 
     [Theory]
-    [InlineData("https://example.com/path?q=1")]
-    [InlineData("http://example.com")]
-    [InlineData("  https://example.com  ")]
-    public void Link_HttpAndHttps_AreOpened(string body)
+    [InlineData("https://example.com/path?q=1", "https://example.com/path?q=1")]
+    [InlineData("http://example.com/a", "http://example.com/a")]
+    [InlineData("  https://example.com  ", "https://example.com/")]
+    public void Link_HttpAndHttps_AreOpenedAsAbsoluteUri(string body, string expected)
     {
-        string? target = OpenTarget.For(Detail(EntryKind.Link, body));
-
-        Assert.Equal(body.Trim(), target);
+        Assert.Equal(expected, OpenTarget.For(Detail(EntryKind.Link, body)));
     }
 
     [Theory]
@@ -65,6 +63,23 @@ public sealed class OpenTargetTests : IDisposable
     [InlineData("   ")]
     [InlineData("mailto:")]
     public void Email_Blank_IsNotOpened(string body)
+    {
+        Assert.Null(OpenTarget.For(Detail(EntryKind.Email, body)));
+    }
+
+    [Theory]
+    [InlineData("a?subject=x@example.com")]
+    [InlineData("a&cc=b@example.com")]
+    [InlineData("a%20b@example.com")]
+    [InlineData("a;b@example.com")]
+    [InlineData("a,b@example.com")]
+    [InlineData("a<b@example.com")]
+    [InlineData("a>b@example.com")]
+    [InlineData("a\"b@example.com")]
+    [InlineData("a\\b@example.com")]
+    [InlineData("a b@example.com")]
+    [InlineData("a\tb@example.com")]
+    public void Email_WithReservedCharacters_IsNotOpened(string body)
     {
         Assert.Null(OpenTarget.For(Detail(EntryKind.Email, body)));
     }
@@ -103,79 +118,115 @@ public sealed class OpenTargetTests : IDisposable
         Assert.Null(OpenTarget.For(detail));
     }
 
+    [Theory]
+    [InlineData("notes.txt")]
+    [InlineData("A.PDF")]
+    [InlineData("photo.JPEG")]
+    [InlineData("sheet.xlsx")]
+    [InlineData("archive.zip")]
+    [InlineData("readme.md")]
+    public void Files_AllowedExtension_IsOpened(string name)
+    {
+        string path = WriteFile(name);
+
+        Assert.Equal(path, OpenTarget.For(Detail(EntryKind.Files, path)));
+        Assert.False(OpenTarget.IsRefusedFile(Detail(EntryKind.Files, path)));
+    }
+
     [Fact]
-    public void Files_OpensTheFirstPath_WhenItIsNotExecutable()
+    public void Files_OpensTheFirstPath_WhenItIsAllowed()
     {
         string first = WriteFile("notes.txt");
-        string second = WriteFile("other.txt");
-        EntryDetail detail = Detail(EntryKind.Files, first + "\n" + second);
+        string second = WriteFile("other.exe");
 
-        Assert.Equal(first, OpenTarget.For(detail));
+        Assert.Equal(first, OpenTarget.For(Detail(EntryKind.Files, first + "\n" + second)));
+    }
+
+    [Fact]
+    public void Files_Directory_IsOpened()
+    {
+        string dir = Path.Combine(_root, "folder");
+        Directory.CreateDirectory(dir);
+
+        Assert.Equal(dir, OpenTarget.For(Detail(EntryKind.Files, dir)));
+        Assert.Equal(dir, OpenTarget.LocationFor(Detail(EntryKind.Files, dir)));
     }
 
     [Theory]
-    [InlineData(".exe")]
-    [InlineData(".EXE")]
-    [InlineData(".com")]
-    [InlineData(".bat")]
-    [InlineData(".cmd")]
-    [InlineData(".ps1")]
-    [InlineData(".vbs")]
-    [InlineData(".js")]
-    [InlineData(".msi")]
-    [InlineData(".scr")]
-    [InlineData(".lnk")]
-    [InlineData(".reg")]
-    [InlineData(".hta")]
-    [InlineData(".wsf")]
-    [InlineData(".jar")]
-    [InlineData(".pif")]
-    [InlineData(".cpl")]
-    [InlineData(".msc")]
-    public void Files_ExecutableFirstPath_IsNotOpened(string extension)
+    [InlineData("a.exe")]
+    [InlineData("A.EXE")]
+    [InlineData("a.url")]
+    [InlineData("a.lnk")]
+    [InlineData("a.vbe")]
+    [InlineData("a.msi")]
+    [InlineData("a.ps1")]
+    [InlineData("a.dll")]
+    [InlineData("noextension")]
+    public void Files_ExistingButDisallowedExtension_IsRefusedButLocated(string name)
     {
-        string exe = WriteFile("tool" + extension);
-        EntryDetail detail = Detail(EntryKind.Files, exe);
+        string path = WriteFile(name);
+        EntryDetail detail = Detail(EntryKind.Files, path);
 
-        Assert.True(OpenTarget.IsExecutable(exe));
         Assert.Null(OpenTarget.For(detail));
-        Assert.Equal(exe, OpenTarget.LocationFor(detail));
+        Assert.True(OpenTarget.IsRefusedFile(detail));
+        Assert.Equal(path, OpenTarget.LocationFor(detail));
     }
 
-    [Fact]
-    public void IsBlockedExecutable_OnlyForFileListsStartingWithAnExecutable()
+    [Theory]
+    [InlineData("a.exe.")]
+    [InlineData("a.exe ")]
+    [InlineData("a.exe:s")]
+    [InlineData("a.txt:stream")]
+    [InlineData("//h/s/a.txt")]
+    [InlineData(@"\\h\s\a.txt")]
+    [InlineData(@"\\?\C:\a.txt")]
+    [InlineData(@"C:\a\b:c.txt")]
+    [InlineData(@"C:\a""b.txt")]
+    public void MalformedPaths_AreNotWellFormed(string path)
     {
-        string exe = WriteFile("tool.exe");
-        string txt = WriteFile("notes.txt");
-
-        Assert.True(OpenTarget.IsBlockedExecutable(Detail(EntryKind.Files, exe + "\n" + txt)));
-        Assert.False(OpenTarget.IsBlockedExecutable(Detail(EntryKind.Files, txt + "\n" + exe)));
-        Assert.False(OpenTarget.IsBlockedExecutable(Detail(EntryKind.Text, exe)));
+        Assert.False(OpenTarget.IsWellFormedPath(path));
     }
 
-    [Fact]
-    public void IsExecutable_OrdinaryFileNames_AreFalse()
+    [Theory]
+    [InlineData(@"C:\a\b.txt")]
+    [InlineData(@"D:\")]
+    [InlineData("relative.txt")]
+    public void WellFormedPaths_AreAccepted(string path)
     {
-        Assert.False(OpenTarget.IsExecutable("notes.txt"));
-        Assert.False(OpenTarget.IsExecutable("archive.exe.zip"));
-        Assert.False(OpenTarget.IsExecutable("no-extension"));
+        Assert.True(OpenTarget.IsWellFormedPath(path));
+    }
+
+    [Theory]
+    [InlineData("a.exe.")]
+    [InlineData("a.exe ")]
+    [InlineData("a.exe:s")]
+    [InlineData("//h/s/a.txt")]
+    [InlineData(@"\\h\s\a.txt")]
+    public void MalformedFirstPath_IsNeitherOpenedNorLocated(string path)
+    {
+        EntryDetail detail = Detail(EntryKind.Files, path);
+
+        Assert.Null(OpenTarget.For(detail));
+        Assert.Null(OpenTarget.LocationFor(detail));
+        Assert.False(OpenTarget.IsRefusedFile(detail));
     }
 
     [Fact]
-    public void Files_MissingFirstPath_IsNull()
+    public void Files_MissingFirstPath_IsNullAndNotRefused()
     {
         EntryDetail detail = Detail(EntryKind.Files, Path.Combine(_root, "gone.txt"));
 
         Assert.Null(OpenTarget.For(detail));
         Assert.Null(OpenTarget.LocationFor(detail));
+        Assert.False(OpenTarget.IsRefusedFile(detail));
     }
 
     [Fact]
-    public void Files_UncPath_IsNotOpened()
+    public void Files_TextEntry_IsNeverRefused()
     {
-        EntryDetail detail = Detail(EntryKind.Files, @"\\server\share\file.txt");
+        string exe = WriteFile("tool.exe");
 
-        Assert.Null(OpenTarget.For(detail));
+        Assert.False(OpenTarget.IsRefusedFile(Detail(EntryKind.Text, exe)));
     }
 
     [Fact]
@@ -194,16 +245,6 @@ public sealed class OpenTargetTests : IDisposable
     public void LocationFor_NonFileKinds_IsNull(EntryKind kind)
     {
         Assert.Null(OpenTarget.LocationFor(Detail(kind, "https://example.com")));
-    }
-
-    [Fact]
-    public void LocationFor_PathWithDoubleQuote_IsNull()
-    {
-        // Windows file names cannot hold a quote, so such a path never exists; the check must still refuse it
-        // before the explorer argument is built.
-        EntryDetail detail = Detail(EntryKind.Files, Path.Combine(_root, "a\"b.txt"));
-
-        Assert.Null(OpenTarget.LocationFor(detail));
     }
 
     private string WriteFile(string name)

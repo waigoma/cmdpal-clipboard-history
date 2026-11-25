@@ -21,7 +21,7 @@ internal static class EntryMessages
     internal const string OcrNotFound = "文字は見つかりませんでした";
     internal const string OcrUnreadable = "文字を読み取れませんでした";
     internal const string QrNotFound = "QR コードが見つかりませんでした";
-    internal const string BlockedExecutable = "実行ファイルは開きません。保存場所を開いてください。";
+    internal const string RefusedFile = "この種類のファイルは開きません。保存場所を開いてください。";
     internal const string CannotOpen = "開けませんでした";
     internal const string CannotShowLocation = "保存場所を開けませんでした";
     internal const string EmptyText = "空の内容は保存できません";
@@ -259,8 +259,10 @@ internal sealed partial class CopyOcrCommand : EntryCommand
         if (state is ImageState.Pending or ImageState.Done or ImageState.Failed)
         {
             Host.Store.Jobs.Enqueue(EntryId);
-            Host.StartWorker(forceOcr: true);
+
+            // Subscribed before the worker starts, so a run that ends at once cannot be missed.
             OcrCopyWaiter.Start(Host, EntryId, firstTry: true);
+            Host.StartWorker(forceOcr: true);
             return EntryResults.Toast(EntryMessages.OcrReading);
         }
 
@@ -349,8 +351,10 @@ internal sealed class OcrCopyWaiter
         if (_firstTry)
         {
             _host.Store.Jobs.Enqueue(_entryId);
-            _host.StartWorker(forceOcr: true);
+
+            // The retry subscribes first too, for the same reason as the first run.
             Start(_host, _entryId, firstTry: false);
+            _host.StartWorker(forceOcr: true);
             return;
         }
 
@@ -438,8 +442,8 @@ internal sealed partial class OpenCommand : EntryCommand
         string? target = OpenTarget.For(entry);
         if (target is null)
         {
-            return EntryResults.Toast(OpenTarget.IsBlockedExecutable(entry)
-                ? EntryMessages.BlockedExecutable
+            return EntryResults.Toast(OpenTarget.IsRefusedFile(entry)
+                ? EntryMessages.RefusedFile
                 : EntryMessages.CannotOpen);
         }
 

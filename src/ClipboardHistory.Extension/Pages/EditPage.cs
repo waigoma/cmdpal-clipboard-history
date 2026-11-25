@@ -134,8 +134,9 @@ internal sealed partial class EditFormContent : FormContent
             return EntryResults.Toast(EntryMessages.TooLongToSave);
         }
 
+        // Compared with line breaks normalised, so a change of break style alone is not a change of text.
         long survivor = _entryId;
-        if (!string.Equals(text, original, StringComparison.Ordinal))
+        if (!string.Equals(Newlines.Normalize(text), Newlines.Normalize(original), StringComparison.Ordinal))
         {
             // An identical entry that already exists is merged in, so the id that remains can differ from this one.
             survivor = _host.Store.EditText(_entryId, text);
@@ -146,6 +147,15 @@ internal sealed partial class EditFormContent : FormContent
             return CommandResult.GoBack();
         }
 
-        return PasteCommand.Paste(_host, survivor, PasteKind.Plain);
+        // The edit is saved either way, so the form closes even when the paste cannot start; the reason is shown.
+        PasteCommand.PasteStart start = PasteCommand.Start(_host, survivor, PasteKind.Plain, format: null);
+        if (start.Started)
+        {
+            return CommandResult.Hide();
+        }
+
+        return start.Message is null
+            ? CommandResult.GoBack()
+            : CommandResult.ShowToast(new ToastArgs { Message = start.Message, Result = CommandResult.GoBack() });
     }
 }

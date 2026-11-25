@@ -27,14 +27,28 @@ internal sealed partial class PasteCommand : EntryCommand
 
     protected override CommandResult Run() => Paste(Host, EntryId, _kind, _format);
 
+    // Whether a paste started, and if not, the line to show. A null message means there is nothing to say.
+    internal readonly record struct PasteStart(bool Started, string? Message);
+
     // Shared with the edit page's "save and paste", so both paths report the same outcomes.
     internal static CommandResult Paste(AppHost host, long entryId, PasteKind kind, string? format = null)
+    {
+        PasteStart start = Start(host, entryId, kind, format);
+        if (start.Started)
+        {
+            return CommandResult.Hide();
+        }
+
+        return start.Message is null ? CommandResult.KeepOpen() : EntryResults.Toast(start.Message);
+    }
+
+    internal static PasteStart Start(AppHost host, long entryId, PasteKind kind, string? format)
     {
         EntryDetail? entry = host.Store.Get(entryId);
         ClipboardPayload? payload = entry is null ? null : PayloadFor(host, entry, kind, format);
         if (payload is null)
         {
-            return EntryResults.SourceMissing();
+            return new PasteStart(false, PasteNotice.TextOf(PasteOutcome.SourceMissing) ?? EntryMessages.OperationFailed);
         }
 
         PasteOutcome? immediate = host.Paste.Begin(payload, fromHotkey: false, outcome => OnDone(host, outcome));
@@ -47,16 +61,16 @@ internal sealed partial class PasteCommand : EntryCommand
                 host.Store.Touch(entryId);
             }
 
-            return CommandResult.Hide();
+            return new PasteStart(true, null);
         }
 
         // Busy means another paste is still in flight; the user is still looking at the list, so stay silent.
         if (immediate == PasteOutcome.Busy)
         {
-            return CommandResult.KeepOpen();
+            return new PasteStart(false, null);
         }
 
-        return EntryResults.Toast(PasteNotice.TextOf(immediate.Value) ?? EntryMessages.OperationFailed);
+        return new PasteStart(false, PasteNotice.TextOf(immediate.Value) ?? EntryMessages.OperationFailed);
     }
 
     // Built from the stored entry. The plain-text preference applies to text entries only: a file list pasted as

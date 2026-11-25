@@ -1,17 +1,23 @@
 namespace Waigoma.ClipboardHistory.Presentation;
 
-// Decides what "open" and "show in folder" act on. Opening runs the target through the shell, so anything that
-// could launch code is refused here rather than left to the caller.
+// Decides what "open" and "show in folder" act on. Opening runs the target through the shell, so a file is opened
+// only when its name is unambiguous and its type is on the allow list. Anything else is shown in its folder instead.
 public static class OpenTarget
 {
     private const string MailtoPrefix = "mailto:";
 
-    // Extensions that the shell would run rather than display. Opening one is refused; showing its folder is not.
-    private static readonly HashSet<string> ExecutableExtensions = new(StringComparer.OrdinalIgnoreCase)
+    // Extensions the shell only displays. Anything outside this list is never handed to the shell.
+    private static readonly HashSet<string> AllowedExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        ".exe", ".com", ".bat", ".cmd", ".ps1", ".vbs", ".js", ".msi", ".scr", ".lnk",
-        ".reg", ".hta", ".wsf", ".jar", ".pif", ".cpl", ".msc",
+        "txt", "md", "log", "csv", "tsv", "json", "xml", "yaml", "yml", "ini",
+        "pdf", "png", "jpg", "jpeg", "gif", "bmp", "webp", "tif", "tiff", "heic", "ico",
+        "mp3", "wav", "flac", "m4a", "ogg", "wma", "mp4", "m4v", "mkv", "mov", "avi", "webm", "wmv",
+        "zip", "7z", "rar",
+        "doc", "docx", "xls", "xlsx", "ppt", "pptx", "odt", "ods", "odp", "rtf", "epub",
     };
+
+    // Characters that would change the meaning of a mailto target, and whitespace or control characters.
+    private static readonly char[] MailtoReserved = ['?', '&', '%', ';', ',', '<', '>', '"', '\\'];
 
     // The target handed to the shell for "open", or null when the entry should not be opened.
     public static string? For(EntryDetail e)
@@ -28,19 +34,19 @@ public static class OpenTarget
                 return ExistingPng(e);
             case EntryKind.Files:
                 string? first = FirstPath(e.Body);
-                if (first is null || IsExecutable(first))
+                if (first is null || !IsWellFormedPath(first) || !IsOpenableKind(first))
                 {
                     return null;
                 }
 
-                return ExistingFile(first);
+                return Exists(first) ? first : null;
             default:
                 return null;
         }
     }
 
-    // The file to select in Explorer, or null when there is none. Executables are allowed here: selecting a file
-    // in its folder does not run it.
+    // The file or folder to select in Explorer, or null when there is none. The type is not checked here: selecting a
+    // file in its folder does not run it.
     public static string? LocationFor(EntryDetail e)
     {
         ArgumentNullException.ThrowIfNull(e);
@@ -52,29 +58,73 @@ public static class OpenTarget
             _ => null,
         };
 
-        // The location is passed to explorer as /select,"<path>", so a quote would break out of that argument.
-        if (path is null || path.Contains('"'))
+        if (path is null || !IsWellFormedPath(path))
         {
             return null;
         }
 
-        return ExistingFile(path);
+        return Exists(path) ? path : null;
     }
 
-    // True when the entry is a file list whose first file the shell would run, so the caller can say why it stays closed.
-    public static bool IsBlockedExecutable(EntryDetail e)
+    // True when the entry is a file list whose first file exists but whose type is not on the allow list, so the
+    // caller can say why it stays closed.
+    public static bool IsRefusedFile(EntryDetail e)
     {
         ArgumentNullException.ThrowIfNull(e);
 
-        string? first = e.Summary.Kind == EntryKind.Files ? FirstPath(e.Body) : null;
-        return first is not null && IsExecutable(first);
+        if (e.Summary.Kind != EntryKind.Files)
+        {
+            return false;
+        }
+
+        string? first = FirstPath(e.Body);
+        return first is not null
+            && IsWellFormedPath(first)
+            && File.Exists(first)
+            && !IsOpenableKind(first);
     }
 
-    public static bool IsExecutable(string path)
+    // Rejects names the shell could read differently from how they were written: a drive is the only colon allowed,
+    // UNC and device prefixes are refused, quotes would break the explorer argument, and a trailing dot or space is
+    // stripped by Windows, so the name would not refer to the file that was checked.
+    internal static bool IsWellFormedPath(string path)
     {
-        string extension = Path.GetExtension(path);
-        return extension.Length > 0 && ExecutableExtensions.Contains(extension);
+        if (string.IsNullOrEmpty(path) || path.Contains('"'))
+        {
+            return false;
+        }
+
+        if (path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        for (int i = path.IndexOf(':'); i >= 0; i = path.IndexOf(':', i + 1))
+        {
+            if (i != 1)
+            {
+                return false;
+            }
+        }
+
+        string name = Path.GetFileName(path);
+        return name.TrimEnd('.', ' ') == name;
     }
+
+    private static bool IsOpenableKind(string path)
+    {
+        string full = Path.GetFullPath(path);
+        if (Directory.Exists(full))
+        {
+            return true;
+        }
+
+        string name = Path.GetFileName(full).TrimEnd('.', ' ');
+        int dot = name.LastIndexOf('.');
+        return dot >= 0 && dot < name.Length - 1 && AllowedExtensions.Contains(name[(dot + 1)..]);
+    }
+
+    private static bool Exists(string path) => File.Exists(path) || Directory.Exists(path);
 
     private static string? HttpUrl(string? body)
     {
@@ -84,10 +134,10 @@ public static class OpenTarget
             return null;
         }
 
-        return uri.Scheme is "http" or "https" ? trimmed : null;
+        // The normalised form is what is opened, so nothing the stored text did not contain can reach the shell.
+        return uri.Scheme is "http" or "https" ? uri.AbsoluteUri : null;
     }
 
-    // The address is checked for characters that would split or quote the mailto target.
     private static string? Mailto(string? body)
     {
         string address = body?.Trim() ?? string.Empty;
@@ -96,7 +146,7 @@ public static class OpenTarget
             address = address[MailtoPrefix.Length..].Trim();
         }
 
-        if (address.Length == 0 || address.Any(c => c <= ' ' || c == '"'))
+        if (address.Length == 0 || address.IndexOfAny(MailtoReserved) >= 0 || address.Any(c => c <= ' '))
         {
             return null;
         }
@@ -110,14 +160,14 @@ public static class OpenTarget
         {
             if (stored.Name == FormatNames.Png)
             {
-                return ExistingFile(stored.FilePath);
+                return File.Exists(stored.FilePath) ? stored.FilePath : null;
             }
         }
 
         return null;
     }
 
-    // Only the first line of a file list counts; a UNC path is never probed, because a stalled share would hang the palette.
+    // Only the first line of a file list counts.
     private static string? FirstPath(string? body)
     {
         if (string.IsNullOrEmpty(body))
@@ -126,16 +176,6 @@ public static class OpenTarget
         }
 
         string first = body.Split('\n', 2)[0].TrimEnd('\r');
-        if (first.Length == 0 || first.StartsWith(@"\\", StringComparison.Ordinal))
-        {
-            return null;
-        }
-
-        return first;
-    }
-
-    private static string? ExistingFile(string path)
-    {
-        return File.Exists(path) ? path : null;
+        return first.Length == 0 ? null : first;
     }
 }

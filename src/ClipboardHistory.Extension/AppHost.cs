@@ -31,7 +31,12 @@ internal sealed partial class AppHost : IDisposable
     private ClipboardMonitor? _monitor;
     private Timer? _maintenanceTimer;
     private Timer? _memoryTimer;
-    private int _disposed;
+    // Guarded by _workerGate together with the worker state, so Dispose and StartWorker cannot race a new child.
+    private bool _isDisposed;
+    private Process? _workerProcess;
+
+    // Only the recorder owns the heartbeat, startup backfill and maintenance; other hosts just show the store.
+    private bool _isRecorder;
 
     public AppHost()
     {
@@ -73,6 +78,7 @@ internal sealed partial class AppHost : IDisposable
 
             // A second process that already holds the recorder name only shows the list; one recorder is enough.
             _recorderMutex = new Mutex(initiallyOwned: false, RecorderMutexName, out bool createdNew);
+            _isRecorder = createdNew;
             if (createdNew)
             {
                 try
@@ -90,19 +96,23 @@ internal sealed partial class AppHost : IDisposable
                 Log.Info("recorder already running in another process; capture is off here");
             }
 
-            Task.Run(() =>
+            if (createdNew)
             {
-                try
+                Task.Run(() =>
                 {
-                    Service.Startup();
-                }
-                catch (Exception ex)
-                {
-                    Log.Error("AppHost.Startup", ex);
-                }
-            });
+                    try
+                    {
+                        Service.Startup();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error("AppHost.Startup", ex);
+                    }
+                });
 
-            _maintenanceTimer = new Timer(_ => Maintain(), null, MaintenancePeriod, MaintenancePeriod);
+                _maintenanceTimer = new Timer(_ => Maintain(), null, MaintenancePeriod, MaintenancePeriod);
+            }
+
             _memoryTimer = new Timer(_ => TrimMemory(), null, Timeout.Infinite, Timeout.Infinite);
             Store.Changed += NoteActivity;
         }
@@ -139,6 +149,11 @@ internal sealed partial class AppHost : IDisposable
     {
         lock (_workerGate)
         {
+            if (_isDisposed)
+            {
+                return;
+            }
+
             if (_workerRunning)
             {
                 _workerPending = true;
@@ -168,9 +183,17 @@ internal sealed partial class AppHost : IDisposable
 
     public void Dispose()
     {
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        Process? child;
+        lock (_workerGate)
         {
-            return;
+            if (_isDisposed)
+            {
+                return;
+            }
+
+            // Set under the gate, so no StartWorker or RunWorkerProcess can start a child after this point.
+            _isDisposed = true;
+            child = _workerProcess;
         }
 
         // Order matters: stop producers first, then write the heartbeat, then release the store and the name.
@@ -179,8 +202,17 @@ internal sealed partial class AppHost : IDisposable
             _maintenanceTimer?.Dispose();
             _memoryTimer?.Dispose();
         });
+        if (child is not null)
+        {
+            StepGuard("AppHost.Dispose.Worker", () => KillQuietly(child));
+        }
+
         StepGuard("AppHost.Dispose.Monitor", () => _monitor?.Dispose());
-        StepGuard("AppHost.Dispose.Service", () => Service?.Dispose());
+        if (_isRecorder)
+        {
+            StepGuard("AppHost.Dispose.Service", () => Service?.Dispose());
+        }
+
         StepGuard("AppHost.Dispose.Store", () => Store?.Dispose());
         StepGuard("AppHost.Dispose.Mutex", () => _recorderMutex?.Dispose());
     }
@@ -239,34 +271,12 @@ internal sealed partial class AppHost : IDisposable
     // Runs until no request is pending, the last pass made no progress, or the time limit is reached.
     private void RunWorkerLoop()
     {
-        long started = Stopwatch.GetTimestamp();
         try
         {
-            while (true)
+            // Each window has its own 5-minute limit. A window ends early only at the limit, and a new one
+            // starts only when a request was made meanwhile, so requests are never dropped by the limit.
+            while (RunWorkerWindow(Stopwatch.GetTimestamp()))
             {
-                bool forceOcr;
-                lock (_workerGate)
-                {
-                    forceOcr = _workerForceOcr;
-                }
-
-                TimeSpan remaining = WorkerMaxRuntime - Stopwatch.GetElapsedTime(started);
-                int processed = RunWorkerProcess(forceOcr, remaining);
-
-                lock (_workerGate)
-                {
-                    bool requested = _workerPending;
-                    _workerPending = false;
-
-                    // A pass that processed nothing is not repeated, even if jobs remain, so this loop cannot spin.
-                    bool again = requested || (processed > 0 && HasPendingJobs());
-                    if (!again || remaining <= TimeSpan.Zero)
-                    {
-                        _workerRunning = false;
-                        _workerForceOcr = false;
-                        break;
-                    }
-                }
             }
         }
         catch (Exception ex)
@@ -284,10 +294,70 @@ internal sealed partial class AppHost : IDisposable
         StepGuard("AppHost.RunWorkerLoop.Finished", () => WorkerFinished?.Invoke());
     }
 
+    // Returns true when the window ended at its limit with a request pending, so the caller starts a new window.
+    private bool RunWorkerWindow(long started)
+    {
+        while (true)
+        {
+            TimeSpan remaining = WorkerMaxRuntime - Stopwatch.GetElapsedTime(started);
+            bool forceOcr;
+            lock (_workerGate)
+            {
+                if (_isDisposed)
+                {
+                    FinishWorkerLocked();
+                    return false;
+                }
+
+                // A request still pending at the limit is kept, so the caller opens a fresh window for it.
+                if (remaining <= TimeSpan.Zero)
+                {
+                    if (!_workerPending)
+                    {
+                        FinishWorkerLocked();
+                        return false;
+                    }
+
+                    return true;
+                }
+
+                // A pass serves every request made before it starts, so the flag is cleared at this point.
+                _workerPending = false;
+                forceOcr = _workerForceOcr;
+            }
+
+            int processed = RunWorkerProcess(forceOcr, remaining);
+
+            lock (_workerGate)
+            {
+                // A pass that processed nothing is not repeated unless a request arrived meanwhile, so this cannot spin.
+                if (!_workerPending && !(processed > 0 && HasPendingJobs()))
+                {
+                    FinishWorkerLocked();
+                    return false;
+                }
+            }
+        }
+    }
+
+    // Runs under _workerGate.
+    private void FinishWorkerLocked()
+    {
+        _workerRunning = false;
+        _workerPending = false;
+        _workerForceOcr = false;
+    }
+
     // Returns the number of jobs the worker processed; 0 when it did not start, was killed, or failed.
     private int RunWorkerProcess(bool forceOcr, TimeSpan remaining)
     {
+        if (remaining <= TimeSpan.Zero)
+        {
+            return 0;
+        }
+
         bool ocr = Settings.Current.Ocr || forceOcr;
+        Process? process = null;
         try
         {
             string exe = Environment.ProcessPath ?? throw new InvalidOperationException("process path is unknown");
@@ -301,8 +371,21 @@ internal sealed partial class AppHost : IDisposable
             info.ArgumentList.Add(Settings.DataRoot);
             info.ArgumentList.Add(ocr ? "1" : "0");
 
-            using Process process = Process.Start(info) ?? throw new InvalidOperationException("worker did not start");
-            if (!process.WaitForExit((int)remaining.TotalMilliseconds))
+            // Started under the gate so that Dispose either sees this child or prevents its start.
+            lock (_workerGate)
+            {
+                if (_isDisposed)
+                {
+                    return 0;
+                }
+
+                process = Process.Start(info) ?? throw new InvalidOperationException("worker did not start");
+                _workerProcess = process;
+            }
+
+            // WaitForExit rejects negative values and treats -1 as infinite, so the timeout is clamped to at least 1 ms.
+            int timeoutMs = (int)Math.Max(1, Math.Min(int.MaxValue, remaining.TotalMilliseconds));
+            if (!process.WaitForExit(timeoutMs))
             {
                 Log.Info("worker stopped at the time limit");
                 KillQuietly(process);
@@ -315,7 +398,27 @@ internal sealed partial class AppHost : IDisposable
         catch (Exception ex)
         {
             Log.Error("AppHost.RunWorkerProcess", ex);
+            if (process is not null)
+            {
+                KillQuietly(process);
+            }
+
             return 0;
+        }
+        finally
+        {
+            if (process is not null)
+            {
+                lock (_workerGate)
+                {
+                    if (ReferenceEquals(_workerProcess, process))
+                    {
+                        _workerProcess = null;
+                    }
+                }
+
+                process.Dispose();
+            }
         }
     }
 
@@ -336,6 +439,11 @@ internal sealed partial class AppHost : IDisposable
     {
         try
         {
+            if (process.HasExited)
+            {
+                return;
+            }
+
             process.Kill(entireProcessTree: true);
             process.WaitForExit();
         }

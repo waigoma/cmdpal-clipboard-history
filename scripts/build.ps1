@@ -35,8 +35,10 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrEmpty($outDir)) {
 }
 $outDir = Join-Path (Split-Path -Parent $project) $outDir
 
-if (-not (Test-Path -LiteralPath (Join-Path $outDir $exeName))) {
-    [Console]::Error.WriteLine('build failed: the native exe is missing from the build output')
+# The AOT exe is the one the layout must ship; the managed apphost with the same name is only a placeholder.
+$nativeExe = Join-Path $outDir (Join-Path 'native' $exeName)
+if (-not (Test-Path -LiteralPath $nativeExe)) {
+    [Console]::Error.WriteLine('build failed: the native exe is missing from OutDir\native')
     exit 1
 }
 
@@ -45,5 +47,15 @@ if (Test-Path -LiteralPath $layout) {
     Remove-Item -LiteralPath $layout -Recurse -Force
 }
 Copy-Item -LiteralPath $outDir -Destination $layout -Recurse -Force
+
+# The layout exe must be the native build byte for byte, so a stale managed exe cannot be shipped by mistake.
+$layoutExe = Join-Path $layout $exeName
+$nativeInfo = Get-Item -LiteralPath $nativeExe
+$layoutInfo = Get-Item -LiteralPath $layoutExe
+if ($nativeInfo.Length -ne $layoutInfo.Length `
+    -or (Get-FileHash -LiteralPath $nativeExe -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $layoutExe -Algorithm SHA256).Hash) {
+    [Console]::Error.WriteLine('build failed: the layout exe is not byte-identical to the native exe')
+    exit 1
+}
 
 Write-Output $layout

@@ -8,22 +8,28 @@ public partial class HistoryCommandsProvider : CommandProvider
 {
     private readonly IListItem[] _topLevel;
 
-    internal HistoryCommandsProvider(AppHost? host)
+    // withEntry false gives a provider with no commands, which is the fallback when the normal one cannot be built.
+    internal HistoryCommandsProvider(AppHost? host, bool withEntry = true)
     {
         DisplayName = "クリップボード履歴";
         Id = "com.waigoma.clipboardhistory";
         Icon = new IconInfo("");
-        Settings = host?.Settings.Settings;
+        if (host is not null)
+        {
+            Settings = host.Settings.Settings;
+        }
 
         // Task 10 replaces this placeholder with the history page and its commands.
-        _topLevel =
-        [
-            new ListItem(new NoOpCommand())
+        _topLevel = withEntry
+            ? new IListItem[]
             {
-                Title = "クリップボード履歴",
-                Icon = new IconInfo(""),
-            },
-        ];
+                new ListItem(new NoOpCommand())
+                {
+                    Title = "クリップボード履歴",
+                    Icon = new IconInfo(""),
+                },
+            }
+            : Array.Empty<IListItem>();
     }
 
     public override IListItem[] TopLevelCommands()

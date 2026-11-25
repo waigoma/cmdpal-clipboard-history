@@ -25,7 +25,16 @@ public sealed partial class ClipboardHistoryExtension : IExtension, IDisposable
             Log.Error("ClipboardHistoryExtension.ctor", ex);
         }
 
-        _provider = new HistoryCommandsProvider(_host);
+        try
+        {
+            _provider = new HistoryCommandsProvider(_host);
+        }
+        catch (Exception ex)
+        {
+            // A provider that lists nothing keeps CmdPal's call from failing; the error is logged for diagnosis.
+            Log.Error("ClipboardHistoryExtension.CreateProvider", ex);
+            _provider = new HistoryCommandsProvider(null, withEntry: false);
+        }
     }
 
     public object? GetProvider(ProviderType providerType)

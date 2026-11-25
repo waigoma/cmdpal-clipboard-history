@@ -155,26 +155,36 @@ internal sealed class SettingsManager : JsonSettingsManager
 
     public event Action? Changed;
 
-    // Adds an executable name to the excluded list. The list is a set, so adding a name twice changes nothing.
-    public void AddExcludedApp(string exe)
+    // Adds an executable name to the excluded list. Returns true when the name is in the saved list afterwards, which
+    // includes the case where it was already there. Never throws: a failure is logged and reported as false.
+    public bool AddExcludedApp(string exe)
     {
-        string name = Path.GetFileName(exe.Trim().Trim('"')).ToLowerInvariant();
-        if (name.Length == 0)
+        try
         {
-            return;
-        }
+            string name = Path.GetFileName((exe ?? string.Empty).Trim().Trim('"')).ToLowerInvariant();
+            if (name.Length == 0)
+            {
+                return false;
+            }
 
-        string current = _excludedApps.Value ?? string.Empty;
-        if (CaptureFilter.ParseExcludedApps(current).Contains(name))
+            string current = _excludedApps.Value ?? string.Empty;
+            if (CaptureFilter.ParseExcludedApps(current).Contains(name))
+            {
+                return true;
+            }
+
+            string next = current.Length == 0 || current.EndsWith('\n')
+                ? current + name
+                : current + "\n" + name;
+            _excludedApps.Value = next;
+            SaveAndApply();
+            return true;
+        }
+        catch (Exception ex)
         {
-            return;
+            Log.Error("SettingsManager.AddExcludedApp", ex);
+            return false;
         }
-
-        string next = current.Length == 0 || current.EndsWith('\n')
-            ? current + name
-            : current + "\n" + name;
-        _excludedApps.Value = next;
-        SaveAndApply();
     }
 
     private void OnSettingsChanged()

@@ -26,6 +26,9 @@ internal sealed partial class HistoryPage : DynamicListPage
     private static readonly TimeSpan ActiveWindow = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan IdleRelease = TimeSpan.FromSeconds(60);
 
+    // The GetItems that a debounced raise causes follows it within this window; a later read is the user's.
+    private static readonly TimeSpan SelfRefreshWindow = TimeSpan.FromSeconds(1);
+
     // Store writes often come in bursts (a paste writes, then the worker writes the image), so one refresh covers them.
     private static readonly TimeSpan StoreChangeDebounce = TimeSpan.FromMilliseconds(100);
 
@@ -46,8 +49,9 @@ internal sealed partial class HistoryPage : DynamicListPage
     private long _lastActive;
     private bool _closed;
 
-    // Set by OnDebounced just before it raises the list, and read by the GetItems that the raise causes. Guarded by _gate.
-    private bool _refreshPending;
+    // Stopwatch timestamp of the raise OnDebounced made, 0 when none is pending. Guarded by _gate. A raise nobody reads
+    // (a hidden page) expires after SelfRefreshWindow, so a later visit counts as the user's activity.
+    private long _refreshRaisedAt;
     private string _lastSearch = string.Empty;
 
     // Built once, so the empty-state item is only reassigned when the state changes.
@@ -92,8 +96,11 @@ internal sealed partial class HistoryPage : DynamicListPage
 
                 // The read that OnDebounced caused is not the user looking at the list, so it must not extend the
                 // active window. Anything the user did since the last read (search, filter, LoadMore) clears the flag.
-                selfRefresh = _refreshPending && filter == _lastFilter && search == _lastSearch;
-                _refreshPending = false;
+                selfRefresh = _refreshRaisedAt != 0
+                    && Stopwatch.GetElapsedTime(_refreshRaisedAt) <= SelfRefreshWindow
+                    && filter == _lastFilter
+                    && search == _lastSearch;
+                _refreshRaisedAt = 0;
                 if (!selfRefresh)
                 {
                     long now = Stopwatch.GetTimestamp();
@@ -198,7 +205,7 @@ internal sealed partial class HistoryPage : DynamicListPage
                 _visible += PageSize;
                 _lastTouch = now;
                 _lastActive = now;
-                _refreshPending = false;
+                _refreshRaisedAt = 0;
             }
 
             _host.NoteActivity();
@@ -241,7 +248,7 @@ internal sealed partial class HistoryPage : DynamicListPage
                 _visible = PageSize;
                 _lastTouch = now;
                 _lastActive = now;
-                _refreshPending = false;
+                _refreshRaisedAt = 0;
             }
 
             _host.NoteActivity();
@@ -330,7 +337,7 @@ internal sealed partial class HistoryPage : DynamicListPage
                 else
                 {
                     // Set under the gate just before the raise, so the GetItems it causes is recognised as the page's own.
-                    _refreshPending = true;
+                    _refreshRaisedAt = Stopwatch.GetTimestamp();
                 }
             }
 

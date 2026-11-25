@@ -1,0 +1,6 @@
+* text=auto
+*.ps1 text eol=crlf
+*.png binary
+*.msix binary
+*.cer binary
+licenses/Apache-2.0.txt -text

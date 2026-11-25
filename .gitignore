@@ -12,3 +12,19 @@ TestResults/
 .claude/settings.local.json
 
 artifacts/
+*.p12
+*.pvk
+*.key
+*.snk
+*.pem
+*.p8
+*.b64
+*.db
+*.db-wal
+*.db-shm
+.superpowers/
+spikes/
+.env
+.env.*
+*.binlog
+.idea/

@@ -1,7 +1,10 @@
-# クリップボード履歴 (CmdPal 拡張)
+# Clipboard History for Command Palette / クリップボード履歴 (CmdPal 拡張)
 
-PowerToys Command Palette (CmdPal) の拡張です。コピーした内容を履歴として残し、CmdPal から検索して貼り付け直せます。
-個人用に作っていて、Raycast の Clipboard History の代わりを目指しています。
+[![CI](https://github.com/waigoma/cmdpal-clipboard-history/actions/workflows/ci.yml/badge.svg)](https://github.com/waigoma/cmdpal-clipboard-history/actions/workflows/ci.yml)
+
+Clipboard History is an extension for PowerToys Command Palette (CmdPal). It records what you copy, lets you search the history from CmdPal, and pastes an entry back into the active app. The history is stored only on your PC, and the extension makes no network connections. Install it from a GitHub Release or build it from source; see [docs/RELEASING.md](docs/RELEASING.md) for how releases are made. This project is not affiliated with Microsoft or Raycast. It is released under the MIT License.
+
+PowerToys Command Palette (CmdPal) の拡張です。コピーした内容を履歴として残し、CmdPal から検索して貼り付け直せます。Raycast の Clipboard History に近い使い心地を目指しています。本プロジェクトは Microsoft および Raycast とは提携していません。
 
 ## 概要
 
@@ -17,25 +20,73 @@ PowerToys Command Palette (CmdPal) の拡張です。コピーした内容を履
 
 ## 導入
 
-前提は次のとおりです。x64 版の Windows 11 と、導入済みの CmdPal です。
+前提は次のとおりです。x64 版の Windows 11 と、PowerToys の Command Palette (CmdPal) です。動作は Command Palette 0.13.13096 / PowerToys 0.102 で確認しています。
 
 1. CmdPal を Windows の起動時に自動で起動する設定にします。拡張は CmdPal が常駐している間だけ記録するためです。
-2. リポジトリのルートで署名済みパッケージを作ります。
+2. 次のどちらかの方法で導入します。
+
+署名済みの版は開発者モードが OFF のままで動きます。開発者モードを使っていた場合は、導入後に OFF へ戻せます。
+
+### Releases から導入する (通常)
+
+1. [Releases](https://github.com/waigoma/cmdpal-clipboard-history/releases) から、最新版の次の 4 つのファイルを 1 つのフォルダーに保存します。
+   - `ClipboardHistory_<version>_x64.msix`
+   - `waigoma.cer`
+   - `install.ps1`
+   - `SHA256SUMS.txt` (検証用)
+2. 保存したファイルが改変されていないことを確認します。保存したフォルダーで次のコマンドを実行し、表示されたハッシュを `SHA256SUMS.txt` の行と見比べます。一致しないときは使わないでください。
+
+   ```powershell
+   Get-FileHash -Algorithm SHA256 .\ClipboardHistory_*_x64.msix, .\waigoma.cer, .\install.ps1
+   ```
+
+3. 管理者として開いた PowerShell で、証明書を「信頼されたユーザー」(`TrustedPeople`) に登録します。これは 1 回だけ行います。`C:\path\to` の部分は、保存した `waigoma.cer` の場所に置き換えます。
+
+   ```powershell
+   Import-Certificate -FilePath "C:\path\to\waigoma.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+   ```
+
+4. 手順 1 のフォルダーで、通常の PowerShell から `install.ps1` を実行します。
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\install.ps1
+   ```
+
+5. CmdPal で「Reload Command Palette extensions」を実行するか、CmdPal を再起動します。
+
+**証明書を信頼するとは、次のことを意味します。** この証明書は公的な認証局が発行したものではなく、作者が自分で作った自己署名証明書です (Subject は `CN=waigoma`)。手順 3 を行うと、この PC では `CN=waigoma` の証明書で署名されたパッケージが Windows に受け入れられます。同じ証明書で署名された別のパッケージも同じように扱われます。作者の身元を第三者が確認したものではありません。SHA256 の確認でわかるのは、ダウンロードしたファイルが公開された内容と同じであることだけです。信頼するかどうかは、ご自身で判断してください。信頼したくない場合は、次の「ソースから作る」の手順で、ご自身の証明書を使って作ってください。
+
+### ソースから作る
+
+前提は、.NET SDK 10.0.300 (`global.json` で指定)、Native AOT のビルドに必要な Visual Studio の構成、署名に使う `signtool.exe` (Windows SDK または NuGet の BuildTools) です。以下はリポジトリのルートで実行します。
+
+1. 自分用の署名証明書を作ります。これは 1 回だけ行います。`CN=waigoma` の自己署名証明書を `Cert:\CurrentUser\My` に作り、公開部分を `artifacts\waigoma.cer` に出力します。
+
+   ```powershell
+   .\scripts\new-certificate.ps1
+   ```
+
+2. 拡張をビルドします。レイアウトは `artifacts\layout`、未署名のパッケージは `artifacts\unsigned` に作られます。
+
+   ```powershell
+   .\scripts\build.ps1
+   ```
+
+3. 署名済みのパッケージを作ります。
 
    ```powershell
    .\scripts\package.ps1
    ```
 
-3. 署名証明書を信頼に登録します。これは管理者として開いた PowerShell で、利用者本人が 1 回だけ実行します。
+4. 管理者として開いた PowerShell で、リポジトリのルートに移動してから、証明書を「信頼されたユーザー」(`TrustedPeople`) に登録します。これは 1 回だけ行います。
 
    ```powershell
-   Import-Certificate -FilePath "C:\path\to\command-palett\artifacts\waigoma.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+   Import-Certificate -FilePath .\artifacts\waigoma.cer -CertStoreLocation Cert:\LocalMachine\TrustedPeople
    ```
 
-   この操作は、その PC で `CN=waigoma` が署名したパッケージを信頼することを意味します。信頼した証明書の秘密鍵は非公開のまま、`Cert:\CurrentUser\My` に残ります。
-   スクリプトは信頼の登録を自分では行いません。
+   この操作は、その PC で `CN=waigoma` が署名したパッケージを信頼することを意味します。信頼した証明書の秘密鍵は非公開のまま、`Cert:\CurrentUser\My` に残ります。スクリプトは信頼の登録を自分では行いません。
 
-4. パッケージを導入します。
+5. パッケージを導入します。
 
    ```powershell
    .\scripts\install.ps1
@@ -47,9 +98,7 @@ PowerToys Command Palette (CmdPal) の拡張です。コピーした内容を履
    .\scripts\install.ps1 -RemoveDevelopment
    ```
 
-5. CmdPal で「Reload Command Palette extensions」を実行するか、CmdPal を再起動します。
-
-署名済みの版は開発者モードが OFF のままで動きます。開発者モードを使っていた場合は、導入後に OFF へ戻せます。
+6. CmdPal で「Reload Command Palette extensions」を実行するか、CmdPal を再起動します。
 
 ## ホットキーの割り当て
 
@@ -59,7 +108,7 @@ PowerToys Command Palette (CmdPal) の拡張です。コピーした内容を履
 2. 「クリップボード履歴」 (一覧) に **Alt+V** を割り当てます。
 3. 「連続貼り付け」にもホットキーを割り当てます。連続貼り付けは、画面を出さずにホットキーで実行する想定の機能です。
 
-Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを外してから使ってください。Raycast の停止も必要です。どちらも利用者が行います。
+Alt+V は、ほかのアプリ (ランチャーなど) でも使われることがあります。同じキーを別のアプリが使っているときは、そちらの割り当てを外してから使ってください。
 
 ## 使い方
 
@@ -137,9 +186,12 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 
 ## 更新と削除
 
-更新するには、`src\ClipboardHistory.Extension\Package.appxmanifest` の `Version` を上げてから、次の順で実行します。導入済みと同じ版番号では上書きできません。
+Releases で新しい版が出たら、その版の 4 つのファイルを新しいフォルダーに保存し、「Releases から導入する」の手順 4 と 5 を行います。証明書が同じものであれば、信頼の登録をやり直す必要はありません。導入済みと同じ版番号では上書きできません。
+
+ソースから更新するには、`src\ClipboardHistory.Extension\Package.appxmanifest` の `Version` を上げてから、次の順で実行します。導入済みと同じ版番号では上書きできません。
 
 ```powershell
+.\scripts\build.ps1
 .\scripts\package.ps1
 .\scripts\install.ps1
 ```
@@ -153,7 +205,7 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 .\scripts\uninstall.ps1 -Force
 ```
 
-証明書の信頼は次の手順で外せます。管理者として開いた PowerShell で、`Cert:\LocalMachine\TrustedPeople` から `CN=waigoma` の証明書を削除します。署名に使った秘密鍵は `Cert:\CurrentUser\My` にあり、それも不要なら削除します。どちらも利用者が行います。
+証明書の信頼は次の手順で外せます。管理者として開いた PowerShell で、`Cert:\LocalMachine\TrustedPeople` から `CN=waigoma` の証明書を削除します。ソースから作った場合は、署名に使った秘密鍵が `Cert:\CurrentUser\My` にあり、それも不要なら削除します。どちらも利用者が行います。
 
 ```powershell
 Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Subject -ceq 'CN=waigoma' | Remove-Item
@@ -171,11 +223,22 @@ Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -ceq 'CN=waigoma' | Re
 dotnet test tests\ClipboardHistory.Core.Tests -c Debug
 ```
 
-- `build.ps1` は Release (x64、Native AOT) で拡張をビルドし、`artifacts\layout` にレイアウトを作ります。
-- `package.ps1` は `build.ps1` を実行したあと、`artifacts\ClipboardHistory_<version>_x64.msix` を作成して署名します。
+- `build.ps1` は Release (x64、Native AOT) で拡張をビルドし、`artifacts\layout` にレイアウトを、`artifacts\unsigned` に未署名の `.msix` を作ります。
+- `package.ps1` は `artifacts\unsigned` の `.msix` に、自分の証明書で署名した `artifacts\ClipboardHistory_<version>_x64.msix` を作ります。
 - `new-certificate.ps1` は `CN=waigoma` の自己署名証明書を `Cert:\CurrentUser\My` に作ります。秘密鍵はエクスポートできません。公開部分だけを `artifacts\waigoma.cer` に出します。
 - `install.ps1` と `uninstall.ps1` の詳細は、それぞれの「導入」と「更新と削除」を参照してください。
+- CI (`.github/workflows/ci.yml`) は、push と pull request ごとにテストとビルドを行います。リリースの手順は [docs/RELEASING.md](docs/RELEASING.md) を参照してください。
 
 必要なもの: .NET SDK 10.0.300、Native AOT のビルドに必要な Visual Studio の構成 (`build.ps1` は Visual Studio Installer のツールを PATH に加えます)、署名に使う `signtool.exe` (`package.ps1` が NuGet の BuildTools か Windows SDK から探します)。
 
 `artifacts\`、`*.cer`、`*.pfx`、`*.msix` は Git の管理対象外です。秘密鍵をリポジトリに入れないでください。
+
+## ライセンス
+
+This project is licensed under the MIT License. See [LICENSE](LICENSE). Third-party components and their notices are listed in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md). The full text of the Apache License 2.0, which applies to some of those components, is in [licenses/Apache-2.0.txt](licenses/Apache-2.0.txt).
+
+本プロジェクトは MIT License で公開しています (`LICENSE`)。同梱・利用しているサードパーティ製コンポーネントのライセンスとコピーライト表記は `THIRD-PARTY-NOTICES.md` に、Apache License 2.0 の全文は `licenses/Apache-2.0.txt` にあります。
+
+## 関連ドキュメント
+
+- [docs/RELEASING.md](docs/RELEASING.md): リリースの手順 (メンテナー向け)

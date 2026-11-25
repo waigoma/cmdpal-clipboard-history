@@ -153,6 +153,9 @@ internal sealed class SettingsManager : JsonSettingsManager
     // Resolved once at startup: the store opened from this root is the one the worker and DIB writer must use.
     public string DataRoot { get; }
 
+    // True when the configured folder could not be used, so the default folder is in use instead. Shown to the user at startup.
+    public bool DataRootFellBack { get; private set; }
+
     public event Action? Changed;
 
     // Adds an executable name to the excluded list. Returns true when the name is in the saved list afterwards, which
@@ -177,7 +180,19 @@ internal sealed class SettingsManager : JsonSettingsManager
                 ? current + name
                 : current + "\n" + name;
             _excludedApps.Value = next;
-            SaveAndApply();
+            try
+            {
+                SaveSettings();
+            }
+            catch (Exception)
+            {
+                // The list shown in the settings must match what is saved, so the unsaved name is taken back out.
+                _excludedApps.Value = current;
+                throw;
+            }
+
+            Volatile.Write(ref _current, BuildOptions());
+            Changed?.Invoke();
             return true;
         }
         catch (Exception ex)
@@ -266,6 +281,7 @@ internal sealed class SettingsManager : JsonSettingsManager
         catch (Exception ex)
         {
             Log.Error("SettingsManager.ResolveDataRoot", ex);
+            DataRootFellBack = true;
             return fallback;
         }
     }

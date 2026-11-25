@@ -17,7 +17,8 @@ internal sealed partial class HistoryPage : DynamicListPage
     private const string EmptyHistoryTitle = "履歴はまだありません";
     private const string NoResultTitle = "見つかりませんでした";
     private const string NoticeSection = "お知らせ";
-    private const string NoticeGlyph = "";
+    private const string PageGlyph = "\uE77F";
+    private const string NoticeGlyph = "\uE7BA";
 
     // A paging position older than this is forgotten, so a list the user came back to starts from the first page.
     private static readonly TimeSpan PagingResetAfter = TimeSpan.FromSeconds(30);
@@ -71,7 +72,7 @@ internal sealed partial class HistoryPage : DynamicListPage
         Title = PageName;
         PlaceholderText = SearchPlaceholder;
         ShowDetails = true;
-        Icon = new IconInfo(string.Empty);
+        Icon = new IconInfo(PageGlyph);
         Filters = _filters;
 
         _debounceTimer = new Timer(_ => OnDebounced(), null, Timeout.Infinite, Timeout.Infinite);
@@ -272,11 +273,27 @@ internal sealed partial class HistoryPage : DynamicListPage
         }
     }
 
-    // Asks CmdPal to read the list again. The list is rebuilt from the store on that read.
+    // Asks CmdPal to read the list again. The list is rebuilt from the store on that read. A refresh comes from a paste or a
+    // store change the user just made, so it counts as activity: the list stays live and its idle release is re-armed.
     public void Refresh()
     {
         try
         {
+            long now = Stopwatch.GetTimestamp();
+            lock (_gate)
+            {
+                if (_closed)
+                {
+                    return;
+                }
+
+                _lastTouch = now;
+                _lastActive = now;
+                _refreshRaisedAt = 0;
+            }
+
+            _host.NoteActivity();
+            ArmIdleRelease();
             RaiseItemsChanged(0);
         }
         catch (Exception ex)
@@ -418,6 +435,9 @@ internal sealed partial class HistoryPage : DynamicListPage
                 _cache = new();
                 _cacheVersion++;
             }
+
+            // The rows are gone, so the memory trim is re-armed to return what they held.
+            _host.NoteActivity();
         }
         catch (Exception ex)
         {

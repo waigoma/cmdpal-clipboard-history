@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
+using Waigoma.ClipboardHistory.Interop;
 using Waigoma.ClipboardHistory.Paste;
 using Waigoma.ClipboardHistory.Presentation;
 using Windows.System;
@@ -28,6 +29,8 @@ internal static class EntryMessages
     internal const string TooLongToSave = "長すぎるため保存できません";
     internal const string ExcludedAppFormat = "{0} を記録しないようにしました";
     internal const string DeletedCountFormat = "{0} 件を削除しました";
+    internal const string PasteBusy = "貼り付けの処理中です";
+    internal const string OcrClipboardChanged = "文字を読み取りました。もう一度「画像から文字をコピー」を選んでください";
 }
 
 // Shapes the result of an action. Errors are toasts that keep the palette open, so the user can retry.
@@ -37,6 +40,14 @@ internal static class EntryResults
     {
         return CommandResult.ShowToast(new ToastArgs { Message = message, Result = CommandResult.KeepOpen() });
     }
+
+    // The outcome of a direct clipboard write through the paste service. Null means the clipboard now holds the payload.
+    internal static CommandResult ForWrite(PasteOutcome? outcome, string successMessage) => outcome switch
+    {
+        null => CommandResult.ShowToast(successMessage),
+        PasteOutcome.Busy => Toast(EntryMessages.PasteBusy),
+        _ => ClipboardFailed(),
+    };
 
     internal static CommandResult Failed() => Toast(EntryMessages.OperationFailed);
 
@@ -107,10 +118,9 @@ internal static class EntryCommands
         return items;
     }
 
-    // The details are loaded only when the menu is first opened, so a long list does not read the store per row.
-    internal static IContextItem[] MoreCommands(AppHost host, EntrySummary e)
+    // The menu takes the entry the row has already read, so opening it does not read the store again.
+    internal static IContextItem[] MoreCommands(AppHost host, EntrySummary e, EntryDetail? detail)
     {
-        EntryDetail? detail = host.Store.Get(e.Id);
         int formatCount = detail is null ? 0 : PayloadFactory.AvailableFormats(detail).Count;
         return Secondary(host, e, host.Options().PasteIsPrimary, formatCount);
     }
@@ -249,9 +259,7 @@ internal sealed partial class CopyOcrCommand : EntryCommand
                 return EntryResults.Toast(EntryMessages.OcrNotFound);
             }
 
-            return Host.Writer.Write(new ClipboardPayload { Text = ocr })
-                ? CommandResult.ShowToast(EntryMessages.OcrCopied)
-                : EntryResults.ClipboardFailed();
+            return EntryResults.ForWrite(Host.Paste.Copy(new ClipboardPayload { Text = ocr }), EntryMessages.OcrCopied);
         }
 
         // Only an image whose OCR has not run yet is worth a worker run; anything else has no text to find.
@@ -260,8 +268,9 @@ internal sealed partial class CopyOcrCommand : EntryCommand
         {
             Host.Store.Jobs.Enqueue(EntryId);
 
-            // Subscribed before the worker starts, so a run that ends at once cannot be missed.
-            OcrCopyWaiter.Start(Host, EntryId, firstTry: true);
+            // Subscribed before the worker starts, so a run that ends at once cannot be missed. The clipboard counter is
+            // remembered now, so the text is not written over something the user copied while the worker ran.
+            OcrCopyWaiter.Start(Host, EntryId, firstTry: true, ClipboardSequence.Current);
             Host.StartWorker(forceOcr: true);
             return EntryResults.Toast(EntryMessages.OcrReading);
         }
@@ -279,20 +288,24 @@ internal sealed class OcrCopyWaiter
     private readonly AppHost _host;
     private readonly long _entryId;
     private readonly bool _firstTry;
+
+    // The clipboard counter when the user asked, so a copy made meanwhile is not overwritten by the text.
+    private readonly uint _sequenceAtStart;
     private readonly object _gate = new();
     private Timer? _giveUp;
     private bool _finished;
 
-    private OcrCopyWaiter(AppHost host, long entryId, bool firstTry)
+    private OcrCopyWaiter(AppHost host, long entryId, bool firstTry, uint sequenceAtStart)
     {
         _host = host;
         _entryId = entryId;
         _firstTry = firstTry;
+        _sequenceAtStart = sequenceAtStart;
     }
 
-    internal static void Start(AppHost host, long entryId, bool firstTry)
+    internal static void Start(AppHost host, long entryId, bool firstTry, uint sequenceAtStart)
     {
-        var waiter = new OcrCopyWaiter(host, entryId, firstTry);
+        var waiter = new OcrCopyWaiter(host, entryId, firstTry, sequenceAtStart);
 
         // The timer exists before the subscription, so a run that ends at once still finds it to dispose.
         waiter._giveUp = new Timer(_ => waiter.GiveUp(), null, GiveUpAfter, Timeout.InfiniteTimeSpan);
@@ -341,10 +354,20 @@ internal sealed class OcrCopyWaiter
                 return;
             }
 
-            bool copied = _host.Writer.Write(new ClipboardPayload { Text = ocr });
-            EntryCommands.NotifyStatus(copied
-                ? EntryMessages.OcrCopied
-                : PasteNotice.TextOf(PasteOutcome.ClipboardFailed) ?? EntryMessages.OperationFailed);
+            // The user copied something while the worker ran, so the text is not written over it.
+            if (ClipboardSequence.Current != _sequenceAtStart)
+            {
+                EntryCommands.NotifyStatus(EntryMessages.OcrClipboardChanged);
+                return;
+            }
+
+            PasteOutcome? outcome = _host.Paste.Copy(new ClipboardPayload { Text = ocr });
+            EntryCommands.NotifyStatus(outcome switch
+            {
+                null => EntryMessages.OcrCopied,
+                PasteOutcome.Busy => EntryMessages.PasteBusy,
+                _ => PasteNotice.TextOf(PasteOutcome.ClipboardFailed) ?? EntryMessages.OperationFailed,
+            });
             return;
         }
 
@@ -353,7 +376,7 @@ internal sealed class OcrCopyWaiter
             _host.Store.Jobs.Enqueue(_entryId);
 
             // The retry subscribes first too, for the same reason as the first run.
-            Start(_host, _entryId, firstTry: false);
+            Start(_host, _entryId, firstTry: false, _sequenceAtStart);
             _host.StartWorker(forceOcr: true);
             return;
         }
@@ -418,9 +441,7 @@ internal sealed partial class CopyQrCommand : EntryCommand
             return EntryResults.Toast(EntryMessages.QrNotFound);
         }
 
-        return Host.Writer.Write(new ClipboardPayload { Text = entry.Qr })
-            ? CommandResult.ShowToast(EntryMessages.Copied)
-            : EntryResults.ClipboardFailed();
+        return EntryResults.ForWrite(Host.Paste.Copy(new ClipboardPayload { Text = entry.Qr }), EntryMessages.Copied);
     }
 }
 
@@ -524,6 +545,7 @@ internal sealed partial class DeleteCommand : EntryCommand
     protected override CommandResult Run()
     {
         Host.Store.Delete(EntryId);
+        Host.RefreshRequested?.Invoke();
         return CommandResult.KeepOpen();
     }
 }
@@ -544,6 +566,7 @@ internal sealed partial class TogglePinCommand : EntryCommand
         }
 
         Host.Store.SetPinned(EntryId, !entry.Summary.Pinned);
+        Host.RefreshRequested?.Invoke();
         return CommandResult.KeepOpen();
     }
 }
@@ -585,6 +608,7 @@ internal sealed partial class DeleteAllConfirmedCommand : InvokableCommand
         try
         {
             int count = _host.Store.DeleteAll();
+            _host.RefreshRequested?.Invoke();
             return EntryResults.Toast(string.Format(CultureInfo.InvariantCulture, EntryMessages.DeletedCountFormat, count));
         }
         catch (Exception ex)

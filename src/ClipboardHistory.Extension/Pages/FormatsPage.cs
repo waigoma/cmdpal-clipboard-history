@@ -19,7 +19,7 @@ internal sealed partial class FormatsPage : ListPage
         Id = "com.waigoma.clipboardhistory.formats." + entryId.ToString(CultureInfo.InvariantCulture);
         Name = "形式を選んで貼り付け";
         Title = "形式を選んで貼り付け";
-        Icon = new IconInfo(string.Empty);
+        Icon = new IconInfo("\uE8C8");
     }
 
     public override IListItem[] GetItems()

@@ -15,6 +15,9 @@ internal static class EntryDetailsBuilder
     internal const int ListedFileLimit = 50;
     internal const int ImageMaxHeight = 400;
 
+    // The most body characters the details and the menu read. Anything past this is never shown, so it is not loaded.
+    internal const int DisplayBodyChars = 20000;
+
     private const string ImageAlt = "画像";
     private const string Processing = "画像を処理しています…";
     private const string ConversionFailed = "画像を変換できませんでした";
@@ -23,12 +26,12 @@ internal static class EntryDetailsBuilder
     private const string Unknown = "不明";
     private const string NoFormats = "なし";
 
-    // Reads the entry from the store when the row is opened. A failure still shows the title, so the pane is never blank.
-    public static Details Build(AppHost host, EntrySummary summary)
+    // Built from the entry the row has already read, so opening the pane does not copy the entry a second time.
+    // A missing entry or a failure still shows the title, so the pane is never blank.
+    public static Details Build(EntrySummary summary, EntryDetail? detail)
     {
         try
         {
-            EntryDetail? detail = host.Store.Get(summary.Id);
             return detail is null ? TitleOnly(summary) : Compose(summary, detail);
         }
         catch (Exception ex)

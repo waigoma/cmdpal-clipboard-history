@@ -70,6 +70,8 @@ function Find-SignTool {
 }
 
 try {
+    # Taken before the build, so a package left over from an earlier build can be told apart from this one.
+    $buildStarted = Get-Date
     Write-Output 'ビルドしています (Release, x64, Native AOT)...'
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $buildScript | Out-Host
     if ($LASTEXITCODE -ne 0) {
@@ -83,6 +85,9 @@ try {
         Select-Object -First 1
     if ($null -eq $unsigned) {
         throw 'ビルドの出力に未署名の .msix が見つかりません。'
+    }
+    if ($unsigned.LastWriteTime -lt $buildStarted) {
+        throw ('ビルドの出力 {0} がこのビルドより前のものです。ビルドが .msix を作り直さなかったため、署名を中止します。' -f $unsigned.Name)
     }
 
     $unsignedInfo = Read-MsixInfo -Path $unsigned.FullName

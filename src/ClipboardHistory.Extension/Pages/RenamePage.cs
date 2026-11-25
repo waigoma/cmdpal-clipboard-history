@@ -19,6 +19,7 @@ internal sealed partial class RenamePage : ContentPage
         Id = "com.waigoma.clipboardhistory.rename." + entryId.ToString(CultureInfo.InvariantCulture);
         Name = "名前を変更";
         Title = "名前を変更";
+        Icon = new IconInfo("\uE8AC");
     }
 
     public override IContent[] GetContent()
@@ -98,6 +99,7 @@ internal sealed partial class RenameFormContent : FormContent
             }
 
             _host.Store.Rename(_entryId, name);
+            _host.RefreshRequested?.Invoke();
             return CommandResult.GoBack();
         }
         catch (Exception ex)

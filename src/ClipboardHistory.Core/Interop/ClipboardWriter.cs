@@ -70,49 +70,49 @@ public sealed class ClipboardWriter : IClipboardWriter
 
         if (textPrimary)
         {
-            Add(pending, Native.CF_UNICODETEXT, AllocBytes(Encoding.Unicode.GetBytes(payload.Text!), 2), content: true, primary: true);
+            Add(pending, Native.CF_UNICODETEXT, AllocBytes(Encoding.Unicode.GetBytes(payload.Text!), 2), primary: true);
         }
 
         if (payload.Html is { Length: > 0 } html)
         {
-            Add(pending, HtmlId, AllocBytes(html, 1), content: true);
+            Add(pending, HtmlId, AllocBytes(html, 1));
         }
 
         if (payload.Rtf is { Length: > 0 } rtf)
         {
-            Add(pending, RtfId, AllocBytes(rtf, 1), content: true);
+            Add(pending, RtfId, AllocBytes(rtf, 1));
         }
 
         if (payload.Files is { Count: > 0 } files)
         {
-            Add(pending, Native.CF_HDROP, AllocBytes(DropFiles.Encode(files), 0), content: true, primary: filesPrimary);
-            Add(pending, DropEffectId, AllocBytes(BitConverter.GetBytes(DropEffectCopy), 0), content: false);
+            Add(pending, Native.CF_HDROP, AllocBytes(DropFiles.Encode(files), 0), primary: filesPrimary);
+            Add(pending, DropEffectId, AllocBytes(BitConverter.GetBytes(DropEffectCopy), 0));
         }
 
         if (!string.IsNullOrEmpty(payload.PngPath))
         {
-            Add(pending, PngId, ReadFileToGlobal(payload.PngPath, out _), content: true, primary: imagePrimary);
+            Add(pending, PngId, ReadFileToGlobal(payload.PngPath, out _), primary: imagePrimary);
         }
 
         if (!string.IsNullOrEmpty(payload.DibPath))
         {
             nint handle = ReadFileToGlobal(payload.DibPath, out uint headerSize);
             uint format = headerSize == DibV5HeaderSize ? Native.CF_DIBV5 : Native.CF_DIB;
-            Add(pending, format, handle, content: true, primary: imagePrimary);
+            Add(pending, format, handle, primary: imagePrimary);
         }
 
         // The marker is always written, so the monitor recognises this copy as our own and does not record it again.
-        Add(pending, OwnId, AllocBytes(new byte[] { 1 }, 0), content: false);
+        Add(pending, OwnId, AllocBytes(new byte[] { 1 }, 0));
     }
 
-    private static void Add(List<Pending> pending, uint format, nint handle, bool content, bool primary = false)
+    private static void Add(List<Pending> pending, uint format, nint handle, bool primary = false)
     {
         if (handle == 0)
         {
             return;
         }
 
-        pending.Add(new Pending { Format = format, Handle = handle, Content = content, Primary = primary });
+        pending.Add(new Pending { Format = format, Handle = handle, Primary = primary });
     }
 
     private bool Publish(List<Pending> pending)
@@ -279,8 +279,6 @@ public sealed class ClipboardWriter : IClipboardWriter
         public uint Format { get; init; }
 
         public nint Handle { get; set; }
-
-        public bool Content { get; init; }
 
         // The format the paste depends on. Other content formats are only fallbacks for the receiving app.
         public bool Primary { get; init; }

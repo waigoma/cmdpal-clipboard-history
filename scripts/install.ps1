@@ -65,6 +65,10 @@ try {
         }
 
         $supportsPreserve = (Get-Command -Name Remove-AppxPackage).Parameters.ContainsKey('PreserveApplicationData')
+        if (-not $supportsPreserve) {
+            # Without the switch, removing the development registration also deletes its LocalState, which holds the history.
+            Write-Warning 'この環境の Remove-AppxPackage は -PreserveApplicationData に対応していません。開発用の登録を削除すると、保存されている履歴 (LocalState) も消えます。'
+        }
         foreach ($package in $development) {
             Write-Output ('開発用の登録を削除しています: {0}' -f $package.PackageFullName)
             if ($supportsPreserve) {

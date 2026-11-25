@@ -9,6 +9,7 @@ public sealed partial class ClipboardHistoryExtension : IExtension, IDisposable
 {
     private readonly ManualResetEvent _extensionDisposedEvent;
     private readonly AppHost? _host;
+    private readonly Exception? _startupError;
     private readonly HistoryCommandsProvider _provider;
 
     public ClipboardHistoryExtension(ManualResetEvent extensionDisposedEvent)
@@ -23,17 +24,18 @@ public sealed partial class ClipboardHistoryExtension : IExtension, IDisposable
         catch (Exception ex)
         {
             Log.Error("ClipboardHistoryExtension.ctor", ex);
+            _startupError = ex;
         }
 
         try
         {
-            _provider = new HistoryCommandsProvider(_host);
+            _provider = new HistoryCommandsProvider(_host, _startupError);
         }
         catch (Exception ex)
         {
-            // A provider that lists nothing keeps CmdPal's call from failing; the error is logged for diagnosis.
+            // The provider's fallback cannot throw, so this is only reached if the normal provider failed unexpectedly.
             Log.Error("ClipboardHistoryExtension.CreateProvider", ex);
-            _provider = new HistoryCommandsProvider(null, withEntry: false);
+            _provider = new HistoryCommandsProvider(null, ex);
         }
     }
 

@@ -25,6 +25,7 @@ internal sealed partial class EditPage : ContentPage
         Id = "com.waigoma.clipboardhistory.edit." + entryId.ToString(CultureInfo.InvariantCulture);
         Name = "内容を編集";
         Title = "内容を編集";
+        Icon = new IconInfo("\uE70F");
     }
 
     public override IContent[] GetContent()
@@ -140,6 +141,7 @@ internal sealed partial class EditFormContent : FormContent
         {
             // An identical entry that already exists is merged in, so the id that remains can differ from this one.
             survivor = _host.Store.EditText(_entryId, text);
+            _host.RefreshRequested?.Invoke();
         }
 
         if (!pasteAfter)

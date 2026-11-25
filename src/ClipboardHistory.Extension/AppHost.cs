@@ -19,31 +19,49 @@ internal sealed partial class AppHost : IDisposable
     private static readonly TimeSpan MemoryTrimDelay = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan WorkerMaxRuntime = TimeSpan.FromMinutes(5);
 
+    // A host that lost the recorder name retries quickly for a while, then only on the maintenance tick.
+    private static readonly TimeSpan RecorderRetryPeriod = TimeSpan.FromSeconds(2);
+    private static readonly TimeSpan RecorderRetryWindow = TimeSpan.FromSeconds(30);
+
     // The most entries one sequential-paste session can walk. Older entries are not reached by the sequence.
     private const int SequenceSnapshotLimit = 1000;
 
     // The worker's exit code is its processed count, and 255 is reserved for a fatal error, so anything else is a count.
     private const int FatalWorkerExitCode = 255;
+    private const int LastProcessedExitCode = 250;
+
+    private const string MonitorFailedNotice = "記録と貼り付けを開始できませんでした。CmdPal を再起動してください。";
+    private const string DataRootFallbackNotice = "保存先を使用できないため、既定の場所に保存しています。";
+    private const string CorruptHistoryNotice = "履歴データが壊れていたため作り直しました。元のデータは保存先に残しています。";
 
     private readonly Lock _workerGate = new();
     private bool _workerRunning;
     private bool _workerPending;
     private bool _workerForceOcr;
 
+    // Guards recorder acquisition and disposal together, so a retry can never start after Dispose has begun.
+    private readonly Lock _recorderGate = new();
+    private bool _recorderDisposed;
+    private bool _startupScheduled;
     private Mutex? _recorderMutex;
-    private ClipboardMonitor? _monitor;
+    private Timer? _retryTimer;
+    private long _retryStarted;
+
+    private readonly ClipboardMonitor _monitor;
     private Timer? _maintenanceTimer;
     private Timer? _memoryTimer;
+
     // Guarded by _workerGate together with the worker state, so Dispose and StartWorker cannot race a new child.
     private bool _isDisposed;
     private Process? _workerProcess;
 
-    // Only the recorder owns the heartbeat, startup backfill and maintenance; other hosts just show the store.
-    private bool _isRecorder;
+    // Only the recorder owns capture, the heartbeat, startup backfill and maintenance; other hosts just show the store.
+    private volatile bool _isRecorder;
 
     public AppHost()
     {
         string localFolder = ApplicationData.Current.LocalFolder.Path;
+        var startupNotices = new List<string>();
         try
         {
             Log.Initialize(localFolder);
@@ -66,7 +84,6 @@ internal sealed partial class AppHost : IDisposable
             _monitor = monitor;
             ClipboardReader reader = new(() => monitor.WindowHandle, () => Target.ExeOf(Target.Foreground));
             ClipboardWriter writer = new(() => monitor.WindowHandle);
-            Writer = writer;
 
             // Paste waits for focus and key timing, so it runs on the thread pool, not on the caller's thread.
             Paste = new PasteService(Target, writer, new SystemDelay(), static action => Task.Run(action));
@@ -94,45 +111,43 @@ internal sealed partial class AppHost : IDisposable
                 Sequence,
                 TimeProvider.System);
 
-            // A second process that already holds the recorder name only shows the list; one recorder is enough.
-            _recorderMutex = new Mutex(initiallyOwned: false, RecorderMutexName, out bool createdNew);
-            _isRecorder = createdNew;
-            if (createdNew)
+            // Every host starts the monitor, because pasting needs its writer window and foreground hook. Only the
+            // recorder acts on the clipboard reports it makes.
+            try
             {
-                try
-                {
-                    monitor.Start();
-                }
-                catch (Exception ex)
-                {
-                    // The palette still works without capture; the user sees the history that was already stored.
-                    Log.Error("AppHost.MonitorStart", ex);
-                }
+                monitor.Start();
             }
-            else
+            catch (Exception ex)
             {
-                Log.Info("recorder already running in another process; capture is off here");
-            }
-
-            if (createdNew)
-            {
-                Task.Run(() =>
-                {
-                    try
-                    {
-                        Service.Startup();
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error("AppHost.Startup", ex);
-                    }
-                });
-
-                _maintenanceTimer = new Timer(_ => Maintain(), null, MaintenancePeriod, MaintenancePeriod);
+                Log.Error("AppHost.MonitorStart", ex);
+                startupNotices.Add(MonitorFailedNotice);
             }
 
             _memoryTimer = new Timer(_ => TrimMemory(), null, Timeout.Infinite, Timeout.Infinite);
+            _maintenanceTimer = new Timer(_ => Maintain(), null, MaintenancePeriod, MaintenancePeriod);
             Store.Changed += NoteActivity;
+
+            if (Store.RecoveredFromCorruption)
+            {
+                startupNotices.Add(CorruptHistoryNotice);
+            }
+
+            if (Settings.DataRootFellBack)
+            {
+                startupNotices.Add(DataRootFallbackNotice);
+            }
+
+            if (startupNotices.Count > 0)
+            {
+                Notice.SetText(string.Join(' ', startupNotices));
+            }
+
+            if (!TryAcquireRecorder())
+            {
+                Log.Info("recorder already running in another process; capture is off here");
+                _retryStarted = Stopwatch.GetTimestamp();
+                _retryTimer = new Timer(_ => RetryRecorder(), null, RecorderRetryPeriod, RecorderRetryPeriod);
+            }
         }
         catch (Exception)
         {
@@ -160,9 +175,6 @@ internal sealed partial class AppHost : IDisposable
     public PasteNotice Notice { get; }
 
     public WindowSystem Target { get; }
-
-    // Shared by the paste and copy commands, which write the clipboard without going through the paste sequence.
-    public IClipboardWriter Writer { get; }
 
     // Set by the provider to the page's refresh. Work that finishes off the UI thread calls it to redraw the list.
     public Action? RefreshRequested { get; set; }
@@ -222,19 +234,28 @@ internal sealed partial class AppHost : IDisposable
             child = _workerProcess;
         }
 
+        // Set under the recorder gate: a retry that is already running finishes first, and none starts after this.
+        bool recorder;
+        lock (_recorderGate)
+        {
+            _recorderDisposed = true;
+            recorder = _isRecorder;
+        }
+
         // Order matters: stop producers first, then write the heartbeat, then release the store and the name.
         StepGuard("AppHost.Dispose.Timers", () =>
         {
             _maintenanceTimer?.Dispose();
             _memoryTimer?.Dispose();
         });
+        StepGuard("AppHost.Dispose.Retry", StopRetryTimer);
         if (child is not null)
         {
             StepGuard("AppHost.Dispose.Worker", () => KillQuietly(child));
         }
 
         StepGuard("AppHost.Dispose.Monitor", () => _monitor?.Dispose());
-        if (_isRecorder)
+        if (recorder)
         {
             StepGuard("AppHost.Dispose.Service", () => Service?.Dispose());
         }
@@ -243,10 +264,105 @@ internal sealed partial class AppHost : IDisposable
         StepGuard("AppHost.Dispose.Mutex", () => _recorderMutex?.Dispose());
     }
 
+    // Takes the recorder name when it is free. The startup work is scheduled here, so it runs at most once per process.
+    // Returns true when this process is the recorder.
+    private bool TryAcquireRecorder()
+    {
+        lock (_recorderGate)
+        {
+            if (_recorderDisposed || _isRecorder)
+            {
+                return _isRecorder;
+            }
+
+            Mutex mutex;
+            try
+            {
+                mutex = new Mutex(initiallyOwned: false, RecorderMutexName, out bool createdNew);
+                if (!createdNew)
+                {
+                    // Keeping the handle would hold the name for a process that is not recording.
+                    mutex.Dispose();
+                    return false;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error("AppHost.AcquireRecorder", ex);
+                return false;
+            }
+
+            _recorderMutex = mutex;
+            _isRecorder = true;
+            if (!_startupScheduled)
+            {
+                _startupScheduled = true;
+                Task.Run(RunStartup);
+            }
+
+            return true;
+        }
+    }
+
+    private void RunStartup()
+    {
+        try
+        {
+            Service.Startup();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("AppHost.Startup", ex);
+        }
+        finally
+        {
+            NoteActivity();
+        }
+    }
+
+    private void RetryRecorder()
+    {
+        try
+        {
+            bool acquired = TryAcquireRecorder();
+            if (acquired || Stopwatch.GetElapsedTime(_retryStarted) >= RecorderRetryWindow)
+            {
+                StopRetryTimer();
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error("AppHost.RetryRecorder", ex);
+        }
+    }
+
+    private void StopRetryTimer()
+    {
+        lock (_recorderGate)
+        {
+            Timer? timer = _retryTimer;
+            _retryTimer = null;
+            timer?.Dispose();
+        }
+    }
+
+    private bool IsRecorderDisposed()
+    {
+        lock (_recorderGate)
+        {
+            return _recorderDisposed;
+        }
+    }
+
     private void OnClipboardChanged()
     {
         try
         {
+            if (!_isRecorder)
+            {
+                return;
+            }
+
             Service.OnClipboardChanged();
         }
         catch (Exception ex)
@@ -267,17 +383,25 @@ internal sealed partial class AppHost : IDisposable
         }
     }
 
-    // Runs on the paste's background thread once a sequential paste finishes. Sent and Busy are silent, as for the list.
+    // Runs on the paste's background thread once a sequential paste finishes. Busy is silent, as for the list.
     private void NoteSequenceDone(PasteOutcome outcome)
     {
         try
         {
-            if (outcome is PasteOutcome.Sent or PasteOutcome.Busy)
+            if (outcome == PasteOutcome.Busy)
             {
                 return;
             }
 
-            Notice.Set(outcome);
+            if (outcome == PasteOutcome.Sent)
+            {
+                Notice.Clear();
+            }
+            else
+            {
+                Notice.Set(outcome);
+            }
+
             RefreshRequested?.Invoke();
         }
         catch (Exception ex)
@@ -290,6 +414,17 @@ internal sealed partial class AppHost : IDisposable
     {
         try
         {
+            if (IsRecorderDisposed())
+            {
+                return;
+            }
+
+            // A host that is not the recorder keeps trying here once the fast retries have stopped.
+            if (!_isRecorder && !TryAcquireRecorder())
+            {
+                return;
+            }
+
             Service.Tick();
         }
         catch (Exception ex)
@@ -434,11 +569,21 @@ internal sealed partial class AppHost : IDisposable
             {
                 Log.Info("worker stopped at the time limit");
                 KillQuietly(process);
+                ResetInterruptedJobs();
                 return 0;
             }
 
             int code = process.ExitCode;
-            return code is >= 0 and < FatalWorkerExitCode ? code : 0;
+            if (code is >= 0 and <= LastProcessedExitCode)
+            {
+                return code;
+            }
+
+            // Anything outside the processed-count range means the worker died mid-job, so its job is put back.
+            Log.Info("worker ended abnormally; exit code " + code.ToString(System.Globalization.CultureInfo.InvariantCulture)
+                + (code == FatalWorkerExitCode ? " (fatal)" : string.Empty));
+            ResetInterruptedJobs();
+            return 0;
         }
         catch (Exception ex)
         {
@@ -446,6 +591,7 @@ internal sealed partial class AppHost : IDisposable
             if (process is not null)
             {
                 KillQuietly(process);
+                ResetInterruptedJobs();
             }
 
             return 0;
@@ -464,6 +610,28 @@ internal sealed partial class AppHost : IDisposable
 
                 process.Dispose();
             }
+        }
+    }
+
+    // Only called after the child has exited, so no job is still being written. Once disposed the store is closing and the
+    // next Startup resets the jobs anyway.
+    private void ResetInterruptedJobs()
+    {
+        try
+        {
+            lock (_workerGate)
+            {
+                if (_isDisposed)
+                {
+                    return;
+                }
+            }
+
+            Store.Jobs.ResetRunning();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("AppHost.ResetInterruptedJobs", ex);
         }
     }
 
@@ -633,6 +801,9 @@ internal sealed class PasteNotice
 
         _current = TextOf(outcome);
     }
+
+    // For a notice that is not a paste outcome, such as a startup problem.
+    public void SetText(string text) => _current = text;
 
     public void Clear() => _current = null;
 }

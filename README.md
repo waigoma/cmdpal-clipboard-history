@@ -76,7 +76,8 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 | ピン留め / 解除 | Ctrl+. | すべて |
 | 画像から文字をコピー | なし | 画像 |
 | QR コードの内容をコピー | なし | QR を含む画像 |
-| 開く / 保存場所を開く | Ctrl+O | リンク、メール、画像、ファイル |
+| 開く | Ctrl+O | リンク、メール、画像、ファイル |
+| 保存場所を開く | なし (メニューから) | 画像、ファイル |
 | このアプリを記録しない | なし | コピー元が分かるもの |
 | 削除 | Ctrl+X | すべて |
 | 期間で削除 (5 / 15 / 30 分、1 / 24 時間) | Ctrl+Shift+X | 最終コピー日時がその期間内のもの |
@@ -105,7 +106,7 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 - 画像の文字認識: 画像を記録したあとに文字を読み取ります (ON)
 - 除外アプリ: 記録しないアプリの実行ファイル名を 1 行に 1 つ書きます。例: `keepass.exe` (空)
 - 連続貼り付けの制限時間: この時間を過ぎると、次の連続貼り付けは最新から始まります (1 分)
-- 連続貼り付けで改行を付ける: テキストの後に改行を付けて貼り付けます (ON)
+- 連続貼り付けで改行を付ける: ON のとき、テキスト系の項目はプレーンテキストに改行を付けて貼り付けます。画像とファイルは改行を付けず、記録したとおりに貼り付けます (ON)
 - 1 形式の上限 / 全体の上限: 大きさの上限を MB で指定します (50 / 2048)
 - 保存先: 履歴を保存するフォルダーのパスです。空のときは既定の場所を使います (空)
 
@@ -116,6 +117,7 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 - 既定の保存先は、パッケージのローカルデータ (`LocalState\data`) です。場所は `%LOCALAPPDATA%\Packages\` の下にある `Waigoma.CmdPal.ClipboardHistory` で始まるフォルダーです。
 - 履歴は暗号化せずに保存します。同じユーザーで動くほかのプログラムからも読めます。
 - 設定ファイルは `LocalState` に置き、保存先が変わっても失われないようにしています。
+- 動作のログは `%LOCALAPPDATA%\Packages\<パッケージのファミリー名>\LocalState\log.txt` に書きます。1 MB を超えると `log.1.txt` に移します。ファミリー名は `Waigoma.CmdPal.ClipboardHistory_` で始まります。起動に失敗したときは、一覧の「クリップボード履歴 (起動に失敗しました)」に例外の種類と HResult、ログの場所を表示します。
 - 記録しないもの:
   - 除外アプリからのコピー
   - Windows の非記録指定 (`ExcludeClipboardContentFromMonitorProcessing`、`Clipboard Viewer Ignore`、`CanIncludeInClipboardHistory` が 0) が付いた内容
@@ -130,6 +132,7 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 - 管理者権限で動くアプリへは自動で貼り付けられません。その場合はコピーまでに留めます。
 - 次の機能は対象外です: AI 連携、スニペット保存、Share、クラウド同期、Raycast の既存履歴の取り込み、リンク先の画像やタイトルの取得 (通信しないため)、履歴の暗号化、ストア公開と winget 公開、arm64 版。
 - 全体の上限を超えると、ピン留めのない古い項目から消します。ピン留めだけで上限を超えるときは消さず、記録は続けます。
+- 削除した画像は、保存先のファイルとしては残ります。毎時の整理で消えます。
 - Windows 標準のクリップボード履歴 (Win+V) と Raycast には手を加えません。
 
 ## 更新と削除
@@ -148,6 +151,13 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 ```powershell
 .\scripts\uninstall.ps1
 .\scripts\uninstall.ps1 -Force
+```
+
+証明書の信頼は次の手順で外せます。管理者として開いた PowerShell で、`Cert:\LocalMachine\TrustedPeople` から `CN=Waigoma` の証明書を削除します。署名に使った秘密鍵は `Cert:\CurrentUser\My` にあり、それも不要なら削除します。どちらも利用者が行います。
+
+```powershell
+Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Subject -eq 'CN=Waigoma' | Remove-Item
+Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -eq 'CN=Waigoma' | Remove-Item
 ```
 
 削除すると、既定の保存先の履歴 (`LocalState\data`) と設定も消えます。保存先を変更していた場合、その場所の履歴は消えません。取り出したい内容があれば、削除の前に確認してください。

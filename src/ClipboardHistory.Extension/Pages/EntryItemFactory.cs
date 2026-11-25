@@ -12,12 +12,12 @@ internal sealed class EntryItemFactory
     internal const string MissingFileTag = "見つかりません";
     internal const string UnknownSource = "不明";
 
-    private const string TextGlyph = "";
-    private const string LinkGlyph = "";
-    private const string EmailGlyph = "";
-    private const string ColorGlyph = "";
-    private const string ImageGlyph = "";
-    private const string FilesGlyph = "";
+    private const string TextGlyph = "\uE8E9";
+    private const string LinkGlyph = "\uE71B";
+    private const string EmailGlyph = "\uE715";
+    private const string ColorGlyph = "\uE790";
+    private const string ImageGlyph = "\uEB9F";
+    private const string FilesGlyph = "\uE8B7";
 
     // One ideographic space: the tag is then a solid block in the colour, because both its text and its background use it.
     private const string ColorBlock = "　";
@@ -162,27 +162,31 @@ internal sealed class EntryItemFactory
 }
 
 // A list row whose details are read from the store the first time they are asked for, so a long list costs nothing
-// until a row is actually opened.
+// until a row is actually opened. The details pane and the menu share one read of the entry.
 internal sealed partial class HistoryListItem : ListItem
 {
+    private readonly AppHost _host;
+    private readonly Lazy<EntryDetail?> _loaded;
     private readonly Lazy<IDetails> _details;
     private readonly Lazy<IContextItem[]> _moreCommands;
 
     public HistoryListItem(ICommand command, EntrySummary summary, AppHost host)
         : base(command)
     {
-        // PublicationOnly: a build that throws is not cached, so the next access tries again instead of keeping a failure.
-        // Build turns its own read failure into a title-only pane, which would be cached. The read is done here first, so a
-        // failure throws out of the factory and is not cached.
-        _details = new Lazy<IDetails>(() =>
-        {
-            host.Store.Get(summary.Id);
-            return EntryDetailsBuilder.Build(host, summary);
-        }, LazyThreadSafetyMode.PublicationOnly);
+        _host = host;
 
-        // The menu reads the entry once when it is first needed. The first more-command is Ctrl+Enter, so the
-        // shortcuts also depend on it, and it is built on the first selection rather than per row.
-        _moreCommands = new Lazy<IContextItem[]>(() => EntryCommands.MoreCommands(host, summary), LazyThreadSafetyMode.PublicationOnly);
+        // PublicationOnly: a read that throws is not cached, so the next access tries again instead of keeping a failure.
+        // A missing entry is cached as null, which the pane and the menu both treat as a title-only row.
+        _loaded = new Lazy<EntryDetail?>(
+            () => host.Store.GetForDisplay(summary.Id, EntryDetailsBuilder.DisplayBodyChars),
+            LazyThreadSafetyMode.PublicationOnly);
+
+        _details = new Lazy<IDetails>(() => EntryDetailsBuilder.Build(summary, _loaded.Value), LazyThreadSafetyMode.PublicationOnly);
+
+        // The first more-command is Ctrl+Enter, so the shortcuts also depend on it, and it is built on the first selection.
+        _moreCommands = new Lazy<IContextItem[]>(
+            () => EntryCommands.MoreCommands(host, summary, _loaded.Value),
+            LazyThreadSafetyMode.PublicationOnly);
     }
 
     // The setter is ignored for the same reason as Details: the actions always come from the store and the summary.
@@ -192,6 +196,7 @@ internal sealed partial class HistoryListItem : ListItem
         {
             try
             {
+                _host.NoteActivity();
                 return _moreCommands.Value;
             }
             catch (Exception ex)
@@ -213,6 +218,7 @@ internal sealed partial class HistoryListItem : ListItem
         {
             try
             {
+                _host.NoteActivity();
                 return _details.Value;
             }
             catch (Exception ex)

@@ -103,12 +103,21 @@ internal sealed partial class PasteCommand : EntryCommand
     {
         try
         {
-            if (outcome is PasteOutcome.Sent or PasteOutcome.Busy)
+            if (outcome == PasteOutcome.Busy)
             {
                 return;
             }
 
-            host.Notice.Set(outcome);
+            // A paste that landed clears the notice of an earlier failure, so the list does not show a stale one.
+            if (outcome == PasteOutcome.Sent)
+            {
+                host.Notice.Clear();
+            }
+            else
+            {
+                host.Notice.Set(outcome);
+            }
+
             host.RefreshRequested?.Invoke();
         }
         catch (Exception ex)

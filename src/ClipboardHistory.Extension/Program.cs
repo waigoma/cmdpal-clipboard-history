@@ -1,5 +1,6 @@
 using System.Threading;
 using Microsoft.CommandPalette.Extensions;
+using Windows.Storage;
 using Shmuelie.WinRTServer;
 using Shmuelie.WinRTServer.CsWinRT;
 using Waigoma.ClipboardHistory.Store;
@@ -45,6 +46,21 @@ internal static class Program
 
     private static int RunComServer()
     {
+        try
+        {
+            return RunComServerCore();
+        }
+        catch (Exception ex)
+        {
+            // Nothing may leave Main: CmdPal only sees the exit code, and the log is the only place the cause is kept.
+            InitializeLogQuietly();
+            Log.Error("Program.RunComServer", ex);
+            return ExitFatal;
+        }
+    }
+
+    private static int RunComServerCore()
+    {
         using ManualResetEvent extensionDisposedEvent = new(false);
 
         // One instance is created here and handed back for every request, so the host never sees two extensions.
@@ -59,6 +75,18 @@ internal static class Program
         server.Stop();
         server.UnsafeDispose();
         return 0;
+    }
+
+    // The package folder is unavailable outside a packaged run, so a failure here is ignored and the error is dropped.
+    private static void InitializeLogQuietly()
+    {
+        try
+        {
+            Log.Initialize(ApplicationData.Current.LocalFolder.Path);
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private static int RunWorker(string root, bool ocr)

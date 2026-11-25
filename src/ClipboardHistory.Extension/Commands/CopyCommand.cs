@@ -22,16 +22,12 @@ internal sealed partial class CopyCommand : EntryCommand
             return EntryResults.SourceMissing();
         }
 
-        if (!host.Writer.Write(payload))
-        {
-            return EntryResults.ClipboardFailed();
-        }
-
-        if (host.Options().MoveToTop)
+        PasteOutcome? outcome = host.Paste.Copy(payload);
+        if (outcome is null && host.Options().MoveToTop)
         {
             host.Store.Touch(entryId);
         }
 
-        return CommandResult.ShowToast(EntryMessages.Copied);
+        return EntryResults.ForWrite(outcome, EntryMessages.Copied);
     }
 }

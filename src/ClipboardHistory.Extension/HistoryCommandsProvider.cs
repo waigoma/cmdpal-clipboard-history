@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using Microsoft.CommandPalette.Extensions;
 using Microsoft.CommandPalette.Extensions.Toolkit;
 
@@ -6,11 +7,13 @@ namespace Waigoma.ClipboardHistory.Extension;
 
 public partial class HistoryCommandsProvider : CommandProvider
 {
-    private const string HistoryIcon = "";
-    private const string SequenceIcon = "";
-    private const string ResetIcon = "";
-    private const string RecordingIcon = "";
-    private const string PausedIcon = "";
+    private const string HistoryIcon = "\uE77F";
+    private const string SequenceIcon = "\uE8EE";
+    private const string ResetIcon = "\uE72C";
+    private const string RecordingIcon = "\uE769";
+    private const string PausedIcon = "\uE768";
+
+    private const string FailureTitle = "クリップボード履歴 (起動に失敗しました)";
 
     private readonly IListItem[] _topLevel;
     private readonly HistoryPage? _page;
@@ -19,8 +22,9 @@ public partial class HistoryCommandsProvider : CommandProvider
     private PauseCommand? _pause;
     private ListItem? _pauseItem;
 
-    // withEntry false gives a provider with no commands, which is the fallback when the normal one cannot be built.
-    internal HistoryCommandsProvider(AppHost? host, bool withEntry = true)
+    // A null host means the extension could not start; the provider then shows one row that explains it instead of
+    // an empty list. startupError is the reason, and is only ever read for its type and code.
+    internal HistoryCommandsProvider(AppHost? host, Exception? startupError = null)
     {
         DisplayName = "クリップボード履歴";
         Id = "com.waigoma.clipboardhistory";
@@ -30,10 +34,10 @@ public partial class HistoryCommandsProvider : CommandProvider
             Settings = host.Settings.Settings;
         }
 
-        // Without a host there is no store to show, so the provider lists nothing rather than a page that cannot work.
         _topLevel = Array.Empty<IListItem>();
-        if (host is null || !withEntry)
+        if (host is null)
         {
+            _topLevel = FailureItems(startupError);
             return;
         }
 
@@ -81,7 +85,7 @@ public partial class HistoryCommandsProvider : CommandProvider
             _page = null;
             _pause = null;
             _pauseItem = null;
-            _topLevel = Array.Empty<IListItem>();
+            _topLevel = FailureItems(ex);
         }
     }
 
@@ -136,7 +140,101 @@ public partial class HistoryCommandsProvider : CommandProvider
         }
     }
 
+    // This runs on the failure path, so it must not throw: a failure to build the row gives an empty list.
+    private static IListItem[] FailureItems(Exception? error)
+    {
+        try
+        {
+            return new IListItem[]
+            {
+                new ListItem(new StartupFailurePage(error))
+                {
+                    Title = FailureTitle,
+                    Subtitle = "原因と log.txt の場所",
+                    Icon = new IconInfo(HistoryIcon),
+                },
+            };
+        }
+        catch (Exception ex)
+        {
+            Log.Error("HistoryCommandsProvider.FailureItems", ex);
+            return [];
+        }
+    }
+
     private static string PauseSubtitle(bool paused) => paused ? "記録を再開します" : "コピー内容の記録を止めます";
 
     private static string PauseIconFor(bool paused) => paused ? PausedIcon : RecordingIcon;
+}
+
+// Explains a start-up failure. It shows the exception type and HResult and where the log is, but never the exception message,
+// because a message can carry a user's path.
+internal sealed partial class StartupFailurePage : ContentPage
+{
+    private const string Explanation = "クリップボード履歴を起動できませんでした。CmdPal を再起動しても直らない場合は、次の情報を添えて確認してください。";
+    private const string UnknownText = "不明";
+    private const string LogFileName = @"LocalState\log.txt";
+
+    private const string FailureName = "クリップボード履歴 (起動に失敗しました)";
+
+    private readonly string _body;
+
+    internal StartupFailurePage(Exception? error)
+    {
+        Id = "com.waigoma.clipboardhistory.startupfailure";
+        Name = FailureName;
+        Title = FailureName;
+        Icon = new IconInfo("\uE783");
+        _body = BodyFor(error);
+    }
+
+    public override IContent[] GetContent()
+    {
+        try
+        {
+            return [new MarkdownContent { Body = _body }];
+        }
+        catch (Exception ex)
+        {
+            Log.Error("StartupFailurePage.GetContent", ex);
+            return [];
+        }
+    }
+
+    private static string BodyFor(Exception? error)
+    {
+        try
+        {
+            string type = error?.GetType().FullName ?? UnknownText;
+            string code = error is null
+                ? UnknownText
+                : "0x" + error.HResult.ToString("X8", CultureInfo.InvariantCulture);
+
+            return Explanation + "\n\n"
+                + "- 例外の種類: `" + type + "`\n"
+                + "- HResult: `" + code + "`\n\n"
+                + "詳しい情報は次のログにあります:\n\n"
+                + "`" + LogPath() + "`";
+        }
+        catch (Exception ex)
+        {
+            Log.Error("StartupFailurePage.BodyFor", ex);
+            return Explanation;
+        }
+    }
+
+    // The family name is only known to a packaged process, so an unpackaged run shows a placeholder instead.
+    private static string LogPath()
+    {
+        try
+        {
+            string family = global::Windows.ApplicationModel.Package.Current.Id.FamilyName;
+            return @"%LOCALAPPDATA%\Packages\" + family + @"\" + LogFileName;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("StartupFailurePage.LogPath", ex);
+            return @"%LOCALAPPDATA%\Packages\<パッケージ名>\" + LogFileName;
+        }
+    }
 }

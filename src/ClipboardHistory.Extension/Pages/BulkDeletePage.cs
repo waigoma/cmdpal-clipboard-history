@@ -25,7 +25,7 @@ internal sealed partial class BulkDeletePage : ListPage
         Id = id;
         Name = "期間で削除";
         Title = "期間で削除";
-        Icon = new IconInfo(string.Empty);
+        Icon = new IconInfo("\uE74D");
     }
 
     public override IListItem[] GetItems()
@@ -100,6 +100,7 @@ internal sealed partial class DeleteSinceCommand : InvokableCommand
         try
         {
             int count = _host.Store.DeleteSince(TimeProvider.System.GetUtcNow() - _span);
+            _host.RefreshRequested?.Invoke();
             return CommandResult.ShowToast(new ToastArgs
             {
                 Message = string.Format(CultureInfo.InvariantCulture, EntryMessages.DeletedCountFormat, count),

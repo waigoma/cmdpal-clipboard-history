@@ -32,7 +32,7 @@ internal sealed class Database : IDisposable
     private static readonly string[] Schema =
     {
         """
-        CREATE TABLE entries(id INTEGER PRIMARY KEY, kind INTEGER NOT NULL, hash TEXT NOT NULL, preview TEXT NOT NULL,
+        CREATE TABLE entries(id INTEGER PRIMARY KEY AUTOINCREMENT, kind INTEGER NOT NULL, hash TEXT NOT NULL, preview TEXT NOT NULL,
           name TEXT, source TEXT, pinned INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, last_copied_at INTEGER NOT NULL,
           width INTEGER NOT NULL DEFAULT 0, height INTEGER NOT NULL DEFAULT 0, byte_size INTEGER NOT NULL DEFAULT 0,
           char_count INTEGER NOT NULL DEFAULT 0, line_count INTEGER NOT NULL DEFAULT 0,
@@ -118,6 +118,8 @@ internal sealed class Database : IDisposable
         Execute("PRAGMA journal_mode = WAL");
         Execute("PRAGMA foreign_keys = ON");
         Execute("PRAGMA cache_size = -512");
+        // Deleted clipboard text should not linger in freed pages, and FAST does that without the full mode's cost on every write.
+        Execute("PRAGMA secure_delete = FAST");
     }
 
     private void Migrate()

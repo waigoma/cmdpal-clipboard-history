@@ -35,7 +35,7 @@ public sealed class ClipboardWriter : IClipboardWriter
         try
         {
             Prepare(payload, pending);
-            if (!pending.Exists(p => p.Content))
+            if (!pending.Exists(p => p.Primary))
             {
                 return false;
             }
@@ -62,9 +62,15 @@ public sealed class ClipboardWriter : IClipboardWriter
 
     private static void Prepare(ClipboardPayload payload, List<Pending> pending)
     {
-        if (!string.IsNullOrEmpty(payload.Text))
+        // Text first, then files, then an image: the same order a user would expect a paste target to prefer.
+        bool textPrimary = !string.IsNullOrEmpty(payload.Text);
+        bool filesPrimary = !textPrimary && payload.Files is { Count: > 0 };
+        // PNG and DIB are interchangeable primaries: either one succeeding is enough for an image copy.
+        bool imagePrimary = !textPrimary && !filesPrimary;
+
+        if (textPrimary)
         {
-            Add(pending, Native.CF_UNICODETEXT, AllocBytes(Encoding.Unicode.GetBytes(payload.Text), 2), content: true);
+            Add(pending, Native.CF_UNICODETEXT, AllocBytes(Encoding.Unicode.GetBytes(payload.Text!), 2), content: true, primary: true);
         }
 
         if (payload.Html is { Length: > 0 } html)
@@ -79,34 +85,34 @@ public sealed class ClipboardWriter : IClipboardWriter
 
         if (payload.Files is { Count: > 0 } files)
         {
-            Add(pending, Native.CF_HDROP, AllocBytes(DropFiles.Encode(files), 0), content: true);
+            Add(pending, Native.CF_HDROP, AllocBytes(DropFiles.Encode(files), 0), content: true, primary: filesPrimary);
             Add(pending, DropEffectId, AllocBytes(BitConverter.GetBytes(DropEffectCopy), 0), content: false);
         }
 
         if (!string.IsNullOrEmpty(payload.PngPath))
         {
-            Add(pending, PngId, ReadFileToGlobal(payload.PngPath, out _), content: true);
+            Add(pending, PngId, ReadFileToGlobal(payload.PngPath, out _), content: true, primary: imagePrimary);
         }
 
         if (!string.IsNullOrEmpty(payload.DibPath))
         {
             nint handle = ReadFileToGlobal(payload.DibPath, out uint headerSize);
             uint format = headerSize == DibV5HeaderSize ? Native.CF_DIBV5 : Native.CF_DIB;
-            Add(pending, format, handle, content: true);
+            Add(pending, format, handle, content: true, primary: imagePrimary);
         }
 
         // The marker is always written, so the monitor recognises this copy as our own and does not record it again.
         Add(pending, OwnId, AllocBytes(new byte[] { 1 }, 0), content: false);
     }
 
-    private static void Add(List<Pending> pending, uint format, nint handle, bool content)
+    private static void Add(List<Pending> pending, uint format, nint handle, bool content, bool primary = false)
     {
         if (handle == 0)
         {
             return;
         }
 
-        pending.Add(new Pending { Format = format, Handle = handle, Content = content });
+        pending.Add(new Pending { Format = format, Handle = handle, Content = content, Primary = primary });
     }
 
     private bool Publish(List<Pending> pending)
@@ -117,7 +123,7 @@ public sealed class ClipboardWriter : IClipboardWriter
             return false;
         }
 
-        int contentSet = 0;
+        bool primarySet = false;
         try
         {
             if (!Native.EmptyClipboard())
@@ -138,10 +144,7 @@ public sealed class ClipboardWriter : IClipboardWriter
                 if (Native.SetClipboardData(item.Format, item.Handle) != 0)
                 {
                     item.Handle = 0;
-                    if (item.Content)
-                    {
-                        contentSet++;
-                    }
+                    primarySet |= item.Primary;
                 }
             }
         }
@@ -150,7 +153,8 @@ public sealed class ClipboardWriter : IClipboardWriter
             Native.CloseClipboard();
         }
 
-        return contentSet > 0;
+        // Without the primary format the paste target would receive nothing useful, so the copy counts as failed.
+        return primarySet;
     }
 
     // Copies data into a new movable global block, plus a zeroed terminator. Returns 0 on failure.
@@ -277,5 +281,8 @@ public sealed class ClipboardWriter : IClipboardWriter
         public nint Handle { get; set; }
 
         public bool Content { get; init; }
+
+        // The format the paste depends on. Other content formats are only fallbacks for the receiving app.
+        public bool Primary { get; init; }
     }
 }

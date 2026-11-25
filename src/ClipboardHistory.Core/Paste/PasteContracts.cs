@@ -16,6 +16,13 @@ public interface IWindowSystem
 
     bool IsCommandPalette(nint hwnd);
 
+    // True for a window that can receive a paste: non-zero, not the Command Palette and not a shell surface.
+    bool IsPasteTarget(nint hwnd);
+
+    // Decides whether the foreground window is the target or a window of the same application. The pid alone is not
+    // enough, because shell hosts put unrelated windows in one process.
+    bool IsSameTarget(nint target, nint foreground);
+
     bool IsElevatedOrUnknown(nint hwnd);
 
     bool AnyModifierDown();

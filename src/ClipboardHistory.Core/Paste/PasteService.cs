@@ -40,8 +40,8 @@ public sealed class PasteService
         {
             nint target = fromHotkey ? _windows.Foreground : _windows.LastTarget;
 
-            // Ctrl+V sent into the command palette itself would paste into its own search box, so refuse first.
-            if (fromHotkey && (target == 0 || _windows.IsCommandPalette(target)))
+            // Ctrl+V sent into the command palette or a shell surface would land in the wrong place, so refuse first.
+            if (fromHotkey && !_windows.IsPasteTarget(target))
             {
                 Release();
                 return PasteOutcome.NoTarget;
@@ -68,6 +68,30 @@ public sealed class PasteService
             Log.Error("paste.begin", ex);
             Release();
             return PasteOutcome.ClipboardFailed;
+        }
+    }
+
+    // Writes the payload without pasting. It shares the single-flight flag, because a write during a paste would replace
+    // the content that the paste is about to send. Returns null when the clipboard now holds the payload.
+    public PasteOutcome? Copy(ClipboardPayload payload)
+    {
+        if (Interlocked.CompareExchange(ref _busy, 1, 0) != 0)
+        {
+            return PasteOutcome.Busy;
+        }
+
+        try
+        {
+            return _writer.Write(payload) ? null : PasteOutcome.ClipboardFailed;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("paste.copy", ex);
+            return PasteOutcome.ClipboardFailed;
+        }
+        finally
+        {
+            Release();
         }
     }
 
@@ -157,7 +181,7 @@ public sealed class PasteService
         }
     }
 
-    // A window of the target's process counts, because apps often move focus between their own windows.
+    // Apps often move focus between their own windows, so the window system decides which of them count as the target.
     private bool IsTargetForeground(nint target)
     {
         nint foreground = _windows.Foreground;
@@ -166,13 +190,7 @@ public sealed class PasteService
             return false;
         }
 
-        if (foreground == target)
-        {
-            return true;
-        }
-
-        uint targetPid = _windows.PidOf(target);
-        return targetPid != 0 && _windows.PidOf(foreground) == targetPid;
+        return _windows.IsSameTarget(target, foreground);
     }
 
     private void Release()

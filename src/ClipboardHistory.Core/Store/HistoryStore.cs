@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using Microsoft.Data.Sqlite;
 using Waigoma.ClipboardHistory.Search;
@@ -8,6 +9,10 @@ namespace Waigoma.ClipboardHistory.Store;
 // so a handler that calls back into the store cannot deadlock.
 public sealed partial class HistoryStore : IDisposable
 {
+    // SQLite result codes for a corrupt file and for a file that is not a database at all.
+    private const int SqliteCorruptCode = 11;
+    private const int SqliteNotDatabaseCode = 26;
+
     private const int PreviewMaxUnits = 200;
 
     // Bounds the indexed text so a very large paste does not bloat the search column.
@@ -25,10 +30,14 @@ public sealed partial class HistoryStore : IDisposable
         _paths = paths;
         _clock = clock;
         paths.EnsureCreated();
-        _db = new Database(paths.Db);
+        _db = OpenDatabase(paths, clock, out bool recovered);
+        RecoveredFromCorruption = recovered;
         Blobs = new BlobStore(paths);
         Jobs = new JobQueue(_db, RaiseChanged);
     }
+
+    // True when the database file was unreadable and was moved aside, so the history starts empty.
+    public bool RecoveredFromCorruption { get; }
 
     public BlobStore Blobs { get; }
 
@@ -156,7 +165,17 @@ public sealed partial class HistoryStore : IDisposable
         RaiseChanged();
     }
 
-    public EntryDetail? Get(long id)
+    public EntryDetail? Get(long id) => ReadDetail(id, maxBodyChars: null);
+
+    // Like Get, but the body, OCR and QR text are cut to maxBodyChars inside SQLite. The details pane never needs more,
+    // and a multi-megabyte entry should not be copied into memory just to be cut there.
+    public EntryDetail? GetForDisplay(long id, int maxBodyChars)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(maxBodyChars);
+        return ReadDetail(id, maxBodyChars);
+    }
+
+    private EntryDetail? ReadDetail(long id, int? maxBodyChars)
     {
         EntrySummary summary;
         string? body;
@@ -165,9 +184,20 @@ public sealed partial class HistoryStore : IDisposable
         var formats = new List<StoredFormat>();
         lock (_db.Gate)
         {
+            // substr is applied in SQL, so the cut is by character and the full text never leaves the database.
+            string textColumns = maxBodyChars is null
+                ? "ocr, qr, thumb, body"
+                : "substr(ocr, 1, @limit), substr(qr, 1, @limit), thumb, substr(body, 1, @limit)";
+            var parameters = new List<(string Name, object? Value)> { ("@id", id) };
+            if (maxBodyChars is { } limit)
+            {
+                parameters.Add(("@limit", (long)limit));
+            }
+
             using (SqliteCommand select = _db.Command(
-                "SELECT id, kind, preview, name, source, pinned, created_at, last_copied_at, width, height, byte_size, char_count, line_count, image_state, ocr, qr, thumb, body FROM entries WHERE id = @id",
-                ("@id", id)))
+                "SELECT id, kind, preview, name, source, pinned, created_at, last_copied_at, width, height, byte_size, char_count, line_count, image_state, "
+                + textColumns + " FROM entries WHERE id = @id",
+                parameters.ToArray()))
             using (SqliteDataReader reader = select.ExecuteReader())
             {
                 if (!reader.Read())
@@ -246,6 +276,43 @@ public sealed partial class HistoryStore : IDisposable
         lock (_db.Gate)
         {
             _db.Dispose();
+        }
+    }
+
+    // A file that SQLite cannot read is kept for inspection under a timestamped name, and the history starts empty.
+    // Any other failure still throws, because it may be a locked file or a newer schema that must not be overwritten.
+    private static Database OpenDatabase(StorePaths paths, TimeProvider clock, out bool recovered)
+    {
+        try
+        {
+            recovered = false;
+            return new Database(paths.Db);
+        }
+        catch (SqliteException ex) when (ex.SqliteErrorCode is SqliteCorruptCode or SqliteNotDatabaseCode)
+        {
+            // The path is never logged: the history file name can reveal where the user keeps their data.
+            Log.Error("HistoryStore.OpenDatabase", ex);
+            MoveCorruptFilesAside(paths, clock.GetUtcNow());
+            recovered = true;
+            return new Database(paths.Db);
+        }
+    }
+
+    private static void MoveCorruptFilesAside(StorePaths paths, DateTimeOffset now)
+    {
+        // Local time, because the file is for the user to find; the format is fixed so the names sort by time.
+        string stamp = now.ToLocalTime().ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+        string target = paths.Db + ".corrupt-" + stamp;
+        foreach (string suffix in new[] { string.Empty, "-wal", "-shm" })
+        {
+            string source = paths.Db + suffix;
+            if (!File.Exists(source))
+            {
+                continue;
+            }
+
+            // A second recovery within the same second is not expected; replacing the older copy keeps startup from failing.
+            File.Move(source, target + suffix, overwrite: true);
         }
     }
 

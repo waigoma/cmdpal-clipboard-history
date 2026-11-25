@@ -157,11 +157,40 @@ public static class PayloadFactory
             return null;
         }
 
+        // A file deleted since the copy would make the whole paste fail, so the missing local paths are dropped.
         List<string> paths = body.Split('\n')
             .Select(line => line.TrimEnd('\r'))
-            .Where(line => line.Length > 0)
+            .Where(line => line.Length > 0 && IsStillThere(line))
             .ToList();
         return paths.Count == 0 ? null : new ClipboardPayload { Files = paths };
+    }
+
+    // Network paths are kept without a check: a share may be offline now and back later, and checking would drop it.
+    private static bool IsStillThere(string path)
+    {
+        if (path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        return File.Exists(path) || Directory.Exists(path) || IsNetworkDrive(path);
+    }
+
+    private static bool IsNetworkDrive(string path)
+    {
+        try
+        {
+            string? root = Path.GetPathRoot(path);
+            return !string.IsNullOrEmpty(root) && new DriveInfo(root).DriveType == DriveType.Network;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch (IOException)
+        {
+            return false;
+        }
     }
 
     private static string? CreateDib(IDibProvider dib, string pngPath)

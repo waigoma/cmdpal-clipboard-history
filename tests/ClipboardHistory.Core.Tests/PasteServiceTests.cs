@@ -48,6 +48,7 @@ public sealed class PasteServiceTests
         h.Windows.Pids[SameProcessWindow] = 100;
         h.Windows.Foreground = SameProcessWindow;
         h.Windows.LastTarget = Target;
+        h.Windows.SameTargets.Add((Target, SameProcessWindow));
 
         PasteOutcome? outcome = null;
         h.Service.Begin(Sample, false, o => outcome = o);
@@ -217,6 +218,93 @@ public sealed class PasteServiceTests
         Assert.Equal(PasteOutcome.NoTarget, immediate);
         Assert.Equal(0, h.Writer.Writes);
         Assert.Equal(0, h.BackgroundRuns);
+    }
+
+    [Fact]
+    public void Hotkey_ForegroundIsShellSurface_ReturnsNoTargetWithoutWriting()
+    {
+        const nint Shell = 0x50;
+        var h = new Harness();
+        h.Windows.Foreground = Shell;
+        h.Windows.NonPasteTargets.Add(Shell);
+
+        PasteOutcome? immediate = h.Service.Begin(Sample, true, _ => Assert.Fail("done must not run"));
+
+        Assert.Equal(PasteOutcome.NoTarget, immediate);
+        Assert.Equal(0, h.Writer.Writes);
+    }
+
+    [Fact]
+    public void Send_SameProcessButWindowSystemDisagrees_IsNotTheTarget()
+    {
+        // The process id alone no longer decides: explorer and UWP hosts share pids across unrelated windows.
+        var h = new Harness();
+        h.Windows.Pids[Target] = 100;
+        h.Windows.Pids[SameProcessWindow] = 100;
+        h.Windows.Foreground = SameProcessWindow;
+        h.Windows.LastTarget = Target;
+
+        PasteOutcome? outcome = null;
+        h.Service.Begin(Sample, false, o => outcome = o);
+
+        Assert.Equal(PasteOutcome.FocusTimeout, outcome);
+        Assert.Empty(h.Windows.SendTimes);
+    }
+
+    [Fact]
+    public void Send_WindowSystemReportsSameTarget_Sends()
+    {
+        var h = new Harness();
+        h.Windows.Foreground = SameProcessWindow;
+        h.Windows.LastTarget = Target;
+        h.Windows.SameTargets.Add((Target, SameProcessWindow));
+
+        PasteOutcome? outcome = null;
+        h.Service.Begin(Sample, false, o => outcome = o);
+
+        Assert.Equal(PasteOutcome.Sent, outcome);
+    }
+
+    [Fact]
+    public void Copy_WhileAPasteRuns_ReturnsBusyAndWritesNothing()
+    {
+        var h = new Harness(runInline: false);
+        h.Windows.Foreground = Target;
+        h.Windows.LastTarget = Target;
+        Assert.Null(h.Service.Begin(Sample, false, _ => { }));
+
+        PasteOutcome? copy = h.Service.Copy(new ClipboardPayload { Text = "other" });
+
+        Assert.Equal(PasteOutcome.Busy, copy);
+        Assert.Equal(1, h.Writer.Writes);
+
+        h.RunQueued();
+        Assert.Null(h.Service.Copy(new ClipboardPayload { Text = "other" }));
+        Assert.Equal(2, h.Writer.Writes);
+    }
+
+    [Fact]
+    public void Copy_WriteFalse_ReturnsClipboardFailed_AndReleasesTheFlag()
+    {
+        var h = new Harness();
+        h.Writer.Result = false;
+
+        Assert.Equal(PasteOutcome.ClipboardFailed, h.Service.Copy(Sample));
+
+        h.Writer.Result = true;
+        Assert.Null(h.Service.Copy(Sample));
+    }
+
+    [Fact]
+    public void Copy_WriteThrows_ReturnsClipboardFailed_AndReleasesTheFlag()
+    {
+        var h = new Harness();
+        h.Writer.ThrowOnWrite = new IOException("busy");
+
+        Assert.Equal(PasteOutcome.ClipboardFailed, h.Service.Copy(Sample));
+
+        h.Writer.ThrowOnWrite = null;
+        Assert.Null(h.Service.Copy(Sample));
     }
 
     [Fact]
@@ -466,6 +554,11 @@ public sealed class PasteServiceTests
 
         public HashSet<nint> CommandPalettes { get; } = new();
 
+        public HashSet<nint> NonPasteTargets { get; } = new();
+
+        // Pairs the real window system would call the same target, as decided by its root owner and class rules.
+        public HashSet<(nint Target, nint Foreground)> SameTargets { get; } = new();
+
         public long ModifierDownFromMs { get; set; }
 
         public long ModifierDownUntilMs { get; set; }
@@ -479,6 +572,11 @@ public sealed class PasteServiceTests
         public uint PidOf(nint hwnd) => Pids.TryGetValue(hwnd, out uint pid) ? pid : 0;
 
         public bool IsCommandPalette(nint hwnd) => CommandPalettes.Contains(hwnd);
+
+        public bool IsPasteTarget(nint hwnd) => hwnd != 0 && !CommandPalettes.Contains(hwnd) && !NonPasteTargets.Contains(hwnd);
+
+        public bool IsSameTarget(nint target, nint foreground) =>
+            target != 0 && foreground != 0 && (target == foreground || SameTargets.Contains((target, foreground)));
 
         public bool IsElevatedOrUnknown(nint hwnd) => hwnd == 0 || Elevated.Contains(hwnd);
 

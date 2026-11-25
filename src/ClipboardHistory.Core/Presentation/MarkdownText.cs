@@ -23,7 +23,8 @@ public static class MarkdownText
         ArgumentNullException.ThrowIfNull(body);
         ArgumentOutOfRangeException.ThrowIfNegative(maxChars);
 
-        string text = Normalize(body);
+        // Normalising stops after maxChars + 1 characters, so a multi-megabyte body costs no more than the limit.
+        string text = Normalize(body, maxChars + 1);
         string content = text;
         if (text.Length > maxChars)
         {
@@ -76,10 +77,11 @@ public static class MarkdownText
 
     // Line endings become LF so the line count in the body does not depend on where the text was copied from. A
     // surrogate without its partner is replaced, because a lone surrogate cannot be encoded as UTF-8 for the renderer.
-    private static string Normalize(string body)
+    // Stops once the result is longer than limit, so the caller can tell the text is over the limit without reading the rest.
+    private static string Normalize(string body, int limit)
     {
-        var sb = new StringBuilder(body.Length);
-        for (int i = 0; i < body.Length; i++)
+        var sb = new StringBuilder(Math.Min(body.Length, limit + 1));
+        for (int i = 0; i < body.Length && sb.Length <= limit; i++)
         {
             char c = body[i];
             if (c == '\r')

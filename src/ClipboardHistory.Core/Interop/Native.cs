@@ -148,6 +148,12 @@ internal static unsafe partial class Native
     [LibraryImport("user32.dll", EntryPoint = "GetClassNameW")]
     internal static partial int GetClassNameW(nint hwnd, char* className, int maxCount);
 
+    // GA_ROOTOWNER walks owners up to the top window, which is how an app's secondary windows are grouped.
+    internal const uint GA_ROOTOWNER = 3;
+
+    [LibraryImport("user32.dll")]
+    internal static partial nint GetAncestor(nint hwnd, uint flags);
+
     [LibraryImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static partial bool EnumChildWindows(nint parent, nint enumFunc, nint lParam);

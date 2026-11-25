@@ -4,6 +4,7 @@ using Xunit;
 namespace Waigoma.ClipboardHistory.Tests;
 
 // Log is process-wide, so each test points it at its own folder and removes that folder afterwards.
+[Collection(LogCollection.Name)]
 public sealed class LogTests : IDisposable
 {
     private const int RotationBytes = 1024 * 1024;

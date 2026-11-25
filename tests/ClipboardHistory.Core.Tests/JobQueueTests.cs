@@ -148,6 +148,72 @@ public sealed class JobQueueTests
     }
 
     [Fact]
+    public void ResetRunning_CountsAnAttemptForEachInterruptedJob()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        AddImage(store, "one");
+        store.Jobs.Claim();
+
+        store.Jobs.ResetRunning();
+
+        Assert.Equal(1, RawDb.Scalar(temp.Paths, "SELECT attempts FROM jobs"));
+        Assert.Equal(1, store.Jobs.Claim()?.Attempts);
+    }
+
+    [Fact]
+    public void ResetRunning_AtAttemptLimit_FailsJobAndEntry_AndRaisesChangedOnce()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long id = AddImage(store, "one");
+        int raised = 0;
+        store.Changed += () => raised++;
+
+        for (int i = 0; i < 3; i++)
+        {
+            store.Jobs.Claim();
+            Assert.Equal(1, store.Jobs.ResetRunning());
+        }
+
+        Assert.Equal(2, RawDb.Scalar(temp.Paths, "SELECT state FROM jobs WHERE entry_id = " + id));
+        Assert.Equal(ImageState.Failed, store.Get(id)?.Summary.ImageState);
+        Assert.Null(store.Jobs.Claim());
+        Assert.Equal(1, raised);
+    }
+
+    [Fact]
+    public void ResetRunning_AtAttemptLimit_KeepsDoneImage()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long id = AddImage(store, "one");
+        RawDb.Execute(temp.Paths, "UPDATE entries SET image_state = 2 WHERE id = " + id);
+        RawDb.Execute(temp.Paths, "UPDATE jobs SET attempts = 2");
+        store.Jobs.Claim();
+
+        Assert.Equal(1, store.Jobs.ResetRunning());
+
+        Assert.Equal(2, RawDb.Scalar(temp.Paths, "SELECT state FROM jobs WHERE entry_id = " + id));
+        Assert.Equal(ImageState.Done, store.Get(id)?.Summary.ImageState);
+    }
+
+    [Fact]
+    public void Fail_AtAttemptLimit_DoesNotOverwriteDoneImage()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long id = AddImage(store, "one");
+        RawDb.Execute(temp.Paths, "UPDATE entries SET image_state = 2 WHERE id = " + id);
+        RawDb.Execute(temp.Paths, "UPDATE jobs SET attempts = 2");
+        store.Jobs.Claim();
+
+        store.Jobs.Fail(id);
+
+        Assert.Equal(ImageState.Done, store.Get(id)?.Summary.ImageState);
+    }
+
+    [Fact]
     public void Enqueue_ResetsAttemptsAndState()
     {
         using var temp = new TempStore();

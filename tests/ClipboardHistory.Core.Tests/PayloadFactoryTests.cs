@@ -119,12 +119,74 @@ public sealed class PayloadFactoryTests
     [Fact]
     public void Full_FilesEntry_ListsOnePathPerLine()
     {
-        EntryDetail entry = Detail(EntryKind.Files, "C:\\a.txt\nC:\\b.txt");
+        using var dir = new PasteTempDir();
+        string a = dir.WriteText("a.txt", "a");
+        string b = dir.WriteText("b.txt", "b");
+        EntryDetail entry = Detail(EntryKind.Files, a + "\n" + b);
 
         ClipboardPayload? payload = PayloadFactory.Full(entry, new FakeDib());
 
         Assert.NotNull(payload);
-        Assert.Equal(new[] { "C:\\a.txt", "C:\\b.txt" }, payload.Files);
+        Assert.Equal(new[] { a, b }, payload.Files);
+    }
+
+    [Fact]
+    public void Full_FilesEntry_DropsLocalPathsThatNoLongerExist()
+    {
+        using var dir = new PasteTempDir();
+        string kept = dir.WriteText("kept.txt", "k");
+        EntryDetail entry = Detail(EntryKind.Files, kept + "\n" + dir.Missing("gone.txt"));
+
+        ClipboardPayload? payload = PayloadFactory.Full(entry, new FakeDib());
+
+        Assert.NotNull(payload);
+        Assert.Equal(new[] { kept }, payload.Files);
+    }
+
+    [Fact]
+    public void Full_FilesEntry_WhenEveryPathIsGone_IsNull()
+    {
+        using var dir = new PasteTempDir();
+        EntryDetail entry = Detail(EntryKind.Files, dir.Missing("a.txt") + "\n" + dir.Missing("b.txt"));
+
+        Assert.Null(PayloadFactory.Full(entry, new FakeDib()));
+    }
+
+    [Fact]
+    public void Full_FilesEntry_KeepsNetworkPathsWithoutChecking()
+    {
+        // A share may be offline, and a check would then drop a path the user can still paste.
+        EntryDetail entry = Detail(EntryKind.Files, @"\\server\share\a.txt" + "\n" + "//server/share/b.txt");
+
+        ClipboardPayload? payload = PayloadFactory.Full(entry, new FakeDib());
+
+        Assert.NotNull(payload);
+        Assert.Equal(new[] { @"\\server\share\a.txt", "//server/share/b.txt" }, payload.Files);
+    }
+
+    [Fact]
+    public void Single_FileFormat_DropsLocalPathsThatNoLongerExist()
+    {
+        using var dir = new PasteTempDir();
+        string kept = dir.WriteText("kept.txt", "k");
+        EntryDetail entry = Detail(EntryKind.Files, dir.Missing("gone.txt") + "\n" + kept);
+
+        ClipboardPayload? payload = PayloadFactory.Single(entry, "ファイル", new FakeDib());
+
+        Assert.NotNull(payload);
+        Assert.Equal(new[] { kept }, payload.Files);
+    }
+
+    [Fact]
+    public void Single_PathFormat_KeepsMissingPaths()
+    {
+        using var dir = new PasteTempDir();
+        string missing = dir.Missing("gone.txt");
+        EntryDetail entry = Detail(EntryKind.Files, missing);
+
+        ClipboardPayload? payload = PayloadFactory.Single(entry, "パス", new FakeDib());
+
+        Assert.Equal(missing, payload?.Text);
     }
 
     [Fact]
@@ -248,12 +310,15 @@ public sealed class PayloadFactoryTests
     [Fact]
     public void Single_FileFormatOfFilesEntry_IsTheFileList()
     {
-        EntryDetail entry = Detail(EntryKind.Files, "C:\\a.txt\nC:\\b.txt");
+        using var dir = new PasteTempDir();
+        string a = dir.WriteText("a.txt", "a");
+        string b = dir.WriteText("b.txt", "b");
+        EntryDetail entry = Detail(EntryKind.Files, a + "\n" + b);
 
         ClipboardPayload? payload = PayloadFactory.Single(entry, "ファイル", new FakeDib());
 
         Assert.NotNull(payload);
-        Assert.Equal(new[] { "C:\\a.txt", "C:\\b.txt" }, payload.Files);
+        Assert.Equal(new[] { a, b }, payload.Files);
     }
 
     [Fact]

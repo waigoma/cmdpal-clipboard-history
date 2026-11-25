@@ -116,6 +116,70 @@ public sealed class HistoryStoreMaintenanceTests
     }
 
     [Fact]
+    public void EnforceTotalLimit_PinsAtOrOverLimit_DeletesNothingEvenWithUnpinnedRows()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        for (int i = 0; i < 3; i++)
+        {
+            long pinned = AddText(store, new string((char)('a' + i), 100), T0 - TimeSpan.FromMinutes(10 + i));
+            store.SetPinned(pinned, true);
+        }
+        long unpinnedOld = AddText(store, new string('x', 50), T0 - TimeSpan.FromMinutes(2));
+        long unpinnedNew = AddText(store, new string('y', 50), T0 - TimeSpan.FromMinutes(1));
+
+        Assert.Equal(0, store.EnforceTotalLimit(250));
+
+        Assert.True(store.Exists(unpinnedOld));
+        Assert.True(store.Exists(unpinnedNew));
+        Assert.Equal(400, store.TotalBytes());
+    }
+
+    [Fact]
+    public void EnforceTotalLimit_NewestRowOverLimitAlone_Survives()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long older = AddText(store, new string('a', 100), T0 - TimeSpan.FromMinutes(2));
+        long huge = AddText(store, new string('b', 500), T0 - TimeSpan.FromMinutes(1));
+
+        Assert.Equal(1, store.EnforceTotalLimit(250));
+
+        Assert.False(store.Exists(older));
+        Assert.True(store.Exists(huge));
+    }
+
+    [Fact]
+    public void EnforceTotalLimit_NewestRowIsNeverDeleted_EvenWhenItIsTheOnlyUnpinnedRow()
+    {
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        long pinned = AddText(store, new string('p', 100), T0 - TimeSpan.FromMinutes(5));
+        store.SetPinned(pinned, true);
+        long newest = AddText(store, new string('n', 300), T0);
+
+        Assert.Equal(0, store.EnforceTotalLimit(250));
+
+        Assert.True(store.Exists(pinned));
+        Assert.True(store.Exists(newest));
+    }
+
+    [Fact]
+    public void Id_IsNotReusedAfterTheNewestEntryIsDeleted()
+    {
+        // Ids are handed to the UI and to the worker, so a deleted id must not come back for a different entry.
+        using var temp = new TempStore();
+        using var store = new HistoryStore(temp.Paths, new FakeClock());
+        AddText(store, "one", T0 - TimeSpan.FromMinutes(2));
+        long newest = AddText(store, "two", T0 - TimeSpan.FromMinutes(1));
+
+        store.Delete(newest);
+        long next = AddText(store, "three", T0);
+
+        Assert.True(next > newest);
+    }
+
+    [Fact]
     public void Touch_MovesLastCopiedAtToNow_AndMissingIdIsNoOp()
     {
         using var temp = new TempStore();

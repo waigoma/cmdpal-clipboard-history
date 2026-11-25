@@ -66,6 +66,41 @@ public sealed class HistoryServiceTests
     }
 
     [Fact]
+    public void PausedCopy_ThenUncleanExit_DoesNotBackfillThatCopy()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromHours(1)));
+        // Not disposed on purpose: the process is assumed to die right after the copy, so no Dispose heartbeat is written.
+        HistoryService paused = f.Create();
+        paused.Paused = true;
+        f.Current = TextCopy(2, "private");
+        paused.OnClipboardChanged();
+
+        f.Current = null;
+        f.Backfill.Items.Add(new BackfillItem("private", null, T0));
+        using HistoryService restarted = f.Create();
+        restarted.Paused = false;
+        restarted.Startup();
+
+        Assert.Equal(0, f.Rows());
+    }
+
+    [Fact]
+    public void UpsertFailure_DoesNotStoreLastSequence()
+    {
+        using var f = new ServiceFixture();
+        using HistoryService service = f.Create();
+        f.Store.SetMeta("last_sequence", "1");
+        // Dropping the table makes Upsert throw, which is the failure this checks.
+        RawDb.Execute(f.Paths, "DROP TABLE entries");
+
+        f.Current = TextCopy(2, "cannot be stored");
+        service.OnClipboardChanged();
+
+        Assert.Equal("1", f.Store.GetMeta("last_sequence"));
+    }
+
+    [Fact]
     public void OnClipboardChanged_ExcludedApp_RecordsNothing()
     {
         using var f = new ServiceFixture();
@@ -251,6 +286,34 @@ public sealed class HistoryServiceTests
     }
 
     [Fact]
+    public void Startup_HeartbeatOlderThanADay_SkipsExpiry_BecauseTheBootClockMayBeWrong()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromDays(2)));
+        f.Store.Upsert(new CapturedEntry(EntryKind.Text, "ancient", Array.Empty<ClipFormat>(),
+            ContentHasher.ForText("ancient"), null, T0 - TimeSpan.FromDays(100)));
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        Assert.Equal(1, f.Rows());
+    }
+
+    [Fact]
+    public void Startup_HeartbeatWithinADay_StillExpires()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromHours(23)));
+        f.Store.Upsert(new CapturedEntry(EntryKind.Text, "ancient", Array.Empty<ClipFormat>(),
+            ContentHasher.ForText("ancient"), null, T0 - TimeSpan.FromDays(100)));
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        Assert.Equal(0, f.Rows());
+    }
+
+    [Fact]
     public void Startup_ExpiresEntriesOlderThanRetention()
     {
         using var f = new ServiceFixture();
@@ -413,8 +476,11 @@ public sealed class HistoryServiceTests
     public void Startup_ExpiresAgain_AfterBackfillAddsOldItems()
     {
         using var f = new ServiceFixture();
-        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromDays(200)));
-        f.Backfill.Items.Add(new BackfillItem("old copy", null, T0 - TimeSpan.FromDays(100)));
+        // The heartbeat must be under a day old, or the clock-skew guard (A10) skips expiry. Backfill only returns items
+        // newer than the heartbeat, so a short retention is what makes the backfilled item expire.
+        f.Options = f.Options with { Retention = TimeSpan.FromHours(1) };
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromHours(2)));
+        f.Backfill.Items.Add(new BackfillItem("old copy", null, T0 - TimeSpan.FromMinutes(90)));
         using HistoryService service = f.Create();
 
         service.Startup();
@@ -563,6 +629,8 @@ public sealed class HistoryServiceTests
         public SequentialPaste Sequence { get; }
 
         public FakeBackfill Backfill { get; } = new();
+
+        public StorePaths Paths => _temp.Paths;
 
         public HistoryOptions Options { get; set; } = new();
 

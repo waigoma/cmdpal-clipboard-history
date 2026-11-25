@@ -17,13 +17,22 @@ public sealed class WindowSystem : IWindowSystem
         "ShellExperienceHost",
     };
 
+    // Desktop surfaces (Progman, WorkerW) are shell windows too: pasting into them would drop the text on the desktop.
     private static readonly string[] IgnoredClasses =
     {
+        "Progman",
+        "WorkerW",
         "Shell_TrayWnd",
         "Shell_SecondaryTrayWnd",
         "XamlExplorerHostIslandWindow",
         "MultitaskingViewFrame",
         "TaskSwitcherWnd",
+    };
+
+    private static readonly string[] SharedHostProcesses =
+    {
+        "explorer",
+        "ApplicationFrameHost",
     };
 
     // Computed once: the answer does not change for the life of this process.
@@ -48,6 +57,59 @@ public sealed class WindowSystem : IWindowSystem
     {
         string? name = ProcessInfo.NameOf(PidOf(hwnd));
         return string.Equals(name, CommandPaletteProcess, StringComparison.OrdinalIgnoreCase);
+    }
+
+    public bool IsPasteTarget(nint hwnd)
+    {
+        if (hwnd == 0 || IsCommandPalette(hwnd))
+        {
+            return false;
+        }
+
+        return !IsIgnoredTarget(ProcessInfo.NameOf(PidOf(hwnd)), ClassNameOf(hwnd));
+    }
+
+    public bool IsSameTarget(nint target, nint foreground)
+    {
+        if (target == 0 || foreground == 0)
+        {
+            return false;
+        }
+
+        // A zero root owner means the window has no owner chain, so it must never match another window by accident.
+        nint targetRoot = Native.GetAncestor(target, Native.GA_ROOTOWNER);
+        nint foregroundRoot = Native.GetAncestor(foreground, Native.GA_ROOTOWNER);
+        uint targetPid = PidOf(target);
+        uint foregroundPid = PidOf(foreground);
+
+        return SameTarget(
+            sameWindow: target == foreground,
+            sameRootOwner: targetRoot != 0 && targetRoot == foregroundRoot,
+            samePid: targetPid != 0 && targetPid == foregroundPid,
+            processName: ProcessInfo.NameOf(targetPid),
+            foregroundClass: ClassNameOf(foreground));
+    }
+
+    // Pure so the decision can be tested without windows. Shell surfaces are refused first, even for the same window.
+    // Explorer and UWP frame hosts share one process across unrelated windows, so only the root owner identifies an app there.
+    internal static bool SameTarget(bool sameWindow, bool sameRootOwner, bool samePid, string? processName, string? foregroundClass)
+    {
+        if (!string.IsNullOrEmpty(foregroundClass) && IgnoredClasses.Contains(foregroundClass, StringComparer.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (sameWindow)
+        {
+            return true;
+        }
+
+        if (!string.IsNullOrEmpty(processName) && SharedHostProcesses.Contains(processName, StringComparer.OrdinalIgnoreCase))
+        {
+            return sameRootOwner;
+        }
+
+        return samePid || sameRootOwner;
     }
 
     // Unknown means the answer cannot be trusted, so the paste is refused rather than sent blind.

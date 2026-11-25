@@ -103,10 +103,7 @@ public sealed class JobQueue
 
             if (state == StateFailed)
             {
-                using SqliteCommand mark = _db.Command(
-                    "UPDATE entries SET image_state = @failed WHERE id = @id",
-                    ("@failed", (long)ImageState.Failed), ("@id", entryId));
-                mark.ExecuteNonQuery();
+                MarkImageFailed(entryId);
                 failed = true;
             }
 
@@ -120,22 +117,57 @@ public sealed class JobQueue
         }
     }
 
+    // A running job that was interrupted (for example by a worker crash) counts as one failed attempt.
+    // Returns the number of jobs that were running.
     public int ResetRunning()
     {
+        bool failed = false;
+        int count = 0;
         lock (_db.Gate)
         {
             using WriteTransaction transaction = _db.BeginWrite();
-            int count;
+            var exhausted = new List<long>();
             using (SqliteCommand command = _db.Command(
-                "UPDATE jobs SET state = @pending WHERE state = @running",
-                ("@pending", StatePending), ("@running", StateRunning)))
+                "UPDATE jobs SET attempts = attempts + 1, state = CASE WHEN attempts + 1 >= @max THEN @failed ELSE @pending END " +
+                "WHERE state = @running RETURNING entry_id, state",
+                ("@max", MaxAttempts), ("@failed", StateFailed), ("@pending", StatePending), ("@running", StateRunning)))
+            using (SqliteDataReader reader = command.ExecuteReader())
             {
-                count = command.ExecuteNonQuery();
+                // The reader is drained before any other command runs on the shared connection.
+                while (reader.Read())
+                {
+                    count++;
+                    if (reader.GetInt64(1) == StateFailed)
+                    {
+                        exhausted.Add(reader.GetInt64(0));
+                    }
+                }
             }
 
+            foreach (long entryId in exhausted)
+            {
+                MarkImageFailed(entryId);
+            }
+
+            failed = exhausted.Count > 0;
             transaction.Commit();
-            return count;
         }
+
+        if (failed)
+        {
+            _onEntryFailed();
+        }
+
+        return count;
+    }
+
+    // A Done image is a result that already exists, so a later failure must not replace it.
+    private void MarkImageFailed(long entryId)
+    {
+        using SqliteCommand mark = _db.Command(
+            "UPDATE entries SET image_state = @failed WHERE id = @id AND image_state <> @done",
+            ("@failed", (long)ImageState.Failed), ("@done", (long)ImageState.Done), ("@id", entryId));
+        mark.ExecuteNonQuery();
     }
 
     public bool HasPending()

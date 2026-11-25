@@ -48,11 +48,6 @@ public sealed class ClipboardReader
 
     private ClipboardSnapshot? ReadCore(long maxFormatBytes)
     {
-        nint clipboardOwner = Native.GetClipboardOwner();
-        string? source = clipboardOwner == 0 ? null : ProcessInfo.ImagePathOf(ProcessInfo.PidOf(clipboardOwner));
-        source ??= _foregroundExe();
-        source = ResolveFrameHostChild(source);
-
         if (!TryOpen(_owner()))
         {
             Log.Info("clipboard.read open-failed");
@@ -61,12 +56,22 @@ public sealed class ClipboardReader
 
         try
         {
+            // Resolved only while the clipboard is open, so no other process can change the owner between the lookup and the read.
+            string? source = ResolveSource();
             return ReadOpened(maxFormatBytes, source);
         }
         finally
         {
             Native.CloseClipboard();
         }
+    }
+
+    private string? ResolveSource()
+    {
+        nint clipboardOwner = Native.GetClipboardOwner();
+        string? source = clipboardOwner == 0 ? null : ProcessInfo.ImagePathOf(ProcessInfo.PidOf(clipboardOwner));
+        source ??= _foregroundExe();
+        return ResolveFrameHostChild(source);
     }
 
     // Opening can fail while another app holds the clipboard, so the open is retried briefly before giving up.

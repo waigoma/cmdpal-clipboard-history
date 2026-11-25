@@ -86,14 +86,24 @@ public sealed class HistoryService : IDisposable
     public void Startup()
     {
         // Order matters: the heartbeat is written last, so the backfill window is never moved past copies it still needs.
+        // A heartbeat that is a day or more old may just mean the boot clock is wrong, so retention waits for the hourly Tick.
+        bool expireNow = !ClockLooksWrongSinceHeartbeat();
         Guarded("HistoryService.Startup.ResetRunning", () => _store.Jobs.ResetRunning());
-        Guarded("HistoryService.Startup.Expire", ExpireRetained);
+        if (expireNow)
+        {
+            Guarded("HistoryService.Startup.Expire", ExpireRetained);
+        }
+
         Guarded("HistoryService.Startup.EnforceTotalLimit", TrimToTotalLimit);
         Guarded("HistoryService.Startup.Sweep", SweepUnreferencedFiles);
         Guarded("HistoryService.Startup.Backfill", Backfill);
 
         // The backfill can add old or large items, so retention and the total limit are applied once more.
-        Guarded("HistoryService.Startup.ExpireAfterBackfill", ExpireRetained);
+        if (expireNow)
+        {
+            Guarded("HistoryService.Startup.ExpireAfterBackfill", ExpireRetained);
+        }
+
         Guarded("HistoryService.Startup.EnforceTotalLimitAfterBackfill", TrimToTotalLimit);
         Guarded("HistoryService.Startup.Heartbeat", WriteHeartbeatNow);
         Guarded("HistoryService.Startup.Worker", () =>
@@ -156,39 +166,49 @@ public sealed class HistoryService : IDisposable
     // Runs under _gate. Returns true when a job is waiting, so the caller starts the worker after releasing the lock.
     private bool Capture(ClipboardSnapshot snapshot)
     {
-        // Recorded even when nothing is stored, so a later backfill does not replay a copy the user has already seen.
-        _store.SetMeta(MetaLastSequence, SequenceText(snapshot.Sequence));
+        // Every observed change moves the heartbeat, including paused, ignored and own writes. Otherwise an unclean exit
+        // after a paused copy would leave the backfill window before that copy, and it would be recorded after restart.
+        Guarded("HistoryService.Capture.Heartbeat", WriteHeartbeatNow);
 
         // Our own paste writes must not reset the sequence, or a repeated paste would restart on every press.
         if (snapshot.IsOwnWrite)
         {
+            StoreLastSequence(snapshot);
             return false;
         }
 
         HistoryOptions options = _options();
         if (CaptureFilter.ShouldIgnore(snapshot, options.ExcludedApps))
         {
+            StoreLastSequence(snapshot);
             return false;
         }
 
         if (_paused)
         {
             _sequence.Reset();
+            StoreLastSequence(snapshot);
             return false;
         }
 
         CapturedEntry? entry = CaptureBuilder.Build(snapshot, options, _clock.GetUtcNow());
         if (entry is null)
         {
+            StoreLastSequence(snapshot);
             return false;
         }
 
+        // Stored only after the Upsert succeeds, so a failed write is seen again as a new change by the next backfill.
         _store.Upsert(entry);
+        StoreLastSequence(snapshot);
         _sequence.Reset();
         WriteHeartbeatFor(entry);
         Guarded("HistoryService.Capture.EnforceTotalLimit", TrimToTotalLimit);
         return PendingJobs();
     }
+
+    private void StoreLastSequence(ClipboardSnapshot snapshot) =>
+        _store.SetMeta(MetaLastSequence, SequenceText(snapshot.Sequence));
 
     // Runs at startup only. Copies made while the app was closed are recovered from the system history, and the
     // current clipboard is recorded if it changed since the last sequence seen.
@@ -323,6 +343,9 @@ public sealed class HistoryService : IDisposable
     {
         _store.SweepFiles(SweepMinAge);
     }
+
+    private bool ClockLooksWrongSinceHeartbeat() =>
+        _backfillSince is { } since && _clock.GetUtcNow() - since > TimeSpan.FromDays(1);
 
     private DateTimeOffset? ReadStoredHeartbeat()
     {

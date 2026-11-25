@@ -19,6 +19,8 @@
          ConserveMemory (below) makes it return memory sooner after the image work. -->
     <ConcurrentGarbageCollection>false</ConcurrentGarbageCollection>
 
+    <!-- CsWinRT would otherwise read Platform.xml of an installed Windows SDK that matches the TFM, which CI does not have. -->
+    <CsWinRTWindowsMetadata>$(NuGetPackageRoot)microsoft.windows.sdk.net.ref\$(WindowsSdkPackageVersion)\winmd</CsWinRTWindowsMetadata>
     <CsWinRTAotOptimizerEnabled>true</CsWinRTAotOptimizerEnabled>
     <CsWinRTAotWarningLevel>2</CsWinRTAotWarningLevel>
     <ILLinkTreatWarningsAsErrors>true</ILLinkTreatWarningsAsErrors>

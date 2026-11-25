@@ -75,8 +75,8 @@ internal sealed class EntryItemFactory
         return string.Join(' ', text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)).Trim();
     }
 
-    // The single attachment point for commands. Task 11 replaces the no-op with the paste, copy and edit commands.
-    private static ICommand CommandFor(EntrySummary e) => new NoOpCommand();
+    // The Enter command. The rest of the actions are built lazily by the row, so this stays cheap for a long list.
+    private ICommand CommandFor(EntrySummary e) => EntryCommands.Primary(_host, e);
 
     // A named entry shows its preview under the name; an unnamed one shows where and when it was copied.
     private static string SubtitleOf(EntrySummary e)
@@ -166,11 +166,37 @@ internal sealed class EntryItemFactory
 internal sealed partial class HistoryListItem : ListItem
 {
     private readonly Lazy<IDetails> _details;
+    private readonly Lazy<IContextItem[]> _moreCommands;
 
     public HistoryListItem(ICommand command, EntrySummary summary, AppHost host)
         : base(command)
     {
         _details = new Lazy<IDetails>(() => EntryDetailsBuilder.Build(host, summary));
+
+        // The menu reads the entry once when it is first needed. The first more-command is Ctrl+Enter, so the
+        // shortcuts also depend on it, and it is built on the first selection rather than per row.
+        _moreCommands = new Lazy<IContextItem[]>(() => EntryCommands.MoreCommands(host, summary));
+    }
+
+    // The setter is ignored for the same reason as Details: the actions always come from the store and the summary.
+    public override IContextItem[] MoreCommands
+    {
+        get
+        {
+            try
+            {
+                return _moreCommands.Value;
+            }
+            catch (Exception ex)
+            {
+                Log.Error("HistoryListItem.MoreCommands", ex);
+                return [];
+            }
+        }
+
+        set
+        {
+        }
     }
 
     // The setter is ignored: the details always come from the store, never from a value assigned by the host.

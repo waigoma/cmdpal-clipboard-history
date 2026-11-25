@@ -30,6 +30,9 @@ public partial class HistoryCommandsProvider : CommandProvider
         try
         {
             _page = new HistoryPage(host, new EntryItemFactory(host));
+
+            // Paste and copy finish off the UI thread, so the page is redrawn through this hook when they report a result.
+            host.RefreshRequested = _page.Refresh;
             _topLevel = new IListItem[]
             {
                 new ListItem(_page)

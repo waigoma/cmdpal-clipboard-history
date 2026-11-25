@@ -63,6 +63,7 @@ internal sealed partial class AppHost : IDisposable
             _monitor = monitor;
             ClipboardReader reader = new(() => monitor.WindowHandle, () => Target.ExeOf(Target.Foreground));
             ClipboardWriter writer = new(() => monitor.WindowHandle);
+            Writer = writer;
 
             // Paste waits for focus and key timing, so it runs on the thread pool, not on the caller's thread.
             Paste = new PasteService(Target, writer, new SystemDelay(), static action => Task.Run(action));
@@ -140,6 +141,12 @@ internal sealed partial class AppHost : IDisposable
     public PasteNotice Notice { get; }
 
     public WindowSystem Target { get; }
+
+    // Shared by the paste and copy commands, which write the clipboard without going through the paste sequence.
+    public IClipboardWriter Writer { get; }
+
+    // Set by the provider to the page's refresh. Work that finishes off the UI thread calls it to redraw the list.
+    public Action? RefreshRequested { get; set; }
 
     // Raised on the worker's thread after the worker has finished and the store has been told about it.
     public event Action? WorkerFinished;
@@ -567,6 +574,18 @@ internal sealed class PasteNotice
 
     public string? Current => _current;
 
+    // The one place that words a paste outcome. The list notice and the palette toast both read it from here.
+    public static string? TextOf(PasteOutcome outcome) => outcome switch
+    {
+        PasteOutcome.Elevated => "管理者権限のアプリには貼り付けられません。クリップボードにコピーしました。",
+        PasteOutcome.FocusTimeout or PasteOutcome.NoTarget or PasteOutcome.SendFailed
+            => "貼り付け先を確認できませんでした。クリップボードにコピーしました。",
+        PasteOutcome.ModifiersHeld => "キーが押されたままのため貼り付けませんでした。",
+        PasteOutcome.ClipboardFailed => "クリップボードを使用できませんでした。",
+        PasteOutcome.SourceMissing => "元のデータが見つかりません。",
+        _ => null,
+    };
+
     public void Set(PasteOutcome outcome)
     {
         if (outcome == PasteOutcome.Busy)
@@ -574,16 +593,7 @@ internal sealed class PasteNotice
             return;
         }
 
-        _current = outcome switch
-        {
-            PasteOutcome.Elevated => "管理者権限のアプリには貼り付けられません。クリップボードにコピーしました。",
-            PasteOutcome.FocusTimeout or PasteOutcome.NoTarget or PasteOutcome.SendFailed
-                => "貼り付け先を確認できませんでした。クリップボードにコピーしました。",
-            PasteOutcome.ModifiersHeld => "キーが押されたままのため貼り付けませんでした。",
-            PasteOutcome.ClipboardFailed => "クリップボードを使用できませんでした。",
-            PasteOutcome.SourceMissing => "元のデータが見つかりません。",
-            _ => null,
-        };
+        _current = TextOf(outcome);
     }
 
     public void Clear() => _current = null;

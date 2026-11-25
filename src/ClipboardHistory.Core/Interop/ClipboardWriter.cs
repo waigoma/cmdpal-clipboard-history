@@ -7,7 +7,7 @@ namespace Waigoma.ClipboardHistory.Interop;
 // Writes a payload to the clipboard. Works from any thread: the owner window may belong to the monitor thread.
 public sealed class ClipboardWriter : IClipboardWriter
 {
-    private const string OwnMarker = "Waigoma.ClipboardHistory.Own";
+    private const string OwnMarker = "waigoma.ClipboardHistory.Own";
     private const string PreferredDropEffect = "Preferred DropEffect";
     private const uint DropEffectCopy = 1;
     private const uint DibV5HeaderSize = 124;

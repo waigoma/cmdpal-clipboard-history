@@ -26,7 +26,7 @@ public sealed class WindowsHistorySourceTests
     [Theory]
     [InlineData("ExcludeClipboardContentFromMonitorProcessing")]
     [InlineData("Clipboard Viewer Ignore")]
-    [InlineData("Waigoma.ClipboardHistory.Own")]
+    [InlineData("waigoma.ClipboardHistory.Own")]
     public void HasBlockingMarker_BlockingName_ReturnsTrue(string name)
     {
         bool blocked = WindowsHistorySource.HasBlockingMarker(new[] { "Text", name }, out bool needsCheck);

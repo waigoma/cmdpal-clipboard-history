@@ -1,15 +1,15 @@
 ﻿# Creates (or reuses) the self-signed code signing certificate for the clipboard history package and exports only the
-# public part to artifacts\Waigoma.cer. The private key stays non-exportable in Cert:\CurrentUser\My. This script never
+# public part to artifacts\waigoma.cer. The private key stays non-exportable in Cert:\CurrentUser\My. This script never
 # trusts the certificate: importing it into LocalMachine\TrustedPeople is left to the user in an elevated PowerShell.
 # Prints the thumbprint as the last line. Runs from any current directory and exits non-zero on failure.
 $ErrorActionPreference = 'Stop'
 
-$subject = 'CN=Waigoma'
-$friendlyName = 'Waigoma CmdPal extensions'
+$subject = 'CN=waigoma'
+$friendlyName = 'waigoma CmdPal extensions'
 $store = 'Cert:\CurrentUser\My'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $repoRoot 'artifacts'
-$cerPath = Join-Path $artifacts 'Waigoma.cer'
+$cerPath = Join-Path $artifacts 'waigoma.cer'
 
 try {
     $now = Get-Date
@@ -17,7 +17,7 @@ try {
     # Reusing the certificate keeps the package signer stable across builds, so an installed version stays updatable.
     # A certificate close to expiry is not reused, so a fresh one is made before the signer stops being valid.
     $existing = Get-ChildItem -LiteralPath $store |
-        Where-Object { $_.Subject -eq $subject -and $_.FriendlyName -eq $friendlyName -and $_.NotAfter -gt $now.AddDays(30) } |
+        Where-Object { $_.Subject -ceq $subject -and $_.FriendlyName -eq $friendlyName -and $_.NotAfter -gt $now.AddDays(30) } |
         Sort-Object -Property NotAfter -Descending |
         Select-Object -First 1
 

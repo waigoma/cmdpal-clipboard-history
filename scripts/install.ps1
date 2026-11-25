@@ -8,10 +8,10 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$packageName = 'Waigoma.CmdPal.ClipboardHistory'
+$packageName = 'waigoma.CmdPal.ClipboardHistory'
 $repoRoot = Split-Path -Parent $PSScriptRoot
 $artifacts = Join-Path $repoRoot 'artifacts'
-$certPath = Join-Path $artifacts 'Waigoma.cer'
+$certPath = Join-Path $artifacts 'waigoma.cer'
 
 try {
     if ([string]::IsNullOrEmpty($Msix)) {
@@ -39,7 +39,7 @@ try {
         $cerThumbprint = (New-Object System.Security.Cryptography.X509Certificates.X509Certificate2 $certPath).Thumbprint
     }
     if ($cerThumbprint -ne $thumbprint) {
-        throw 'artifacts\Waigoma.cer が署名に使われた証明書と一致しません。scripts\new-certificate.ps1 を実行してから scripts\package.ps1 で作り直してください。'
+        throw 'artifacts\waigoma.cer が署名に使われた証明書と一致しません。scripts\new-certificate.ps1 を実行してから scripts\package.ps1 で作り直してください。'
     }
 
     $trusted = @(Get-ChildItem -LiteralPath 'Cert:\LocalMachine\TrustedPeople' -ErrorAction SilentlyContinue |
@@ -50,7 +50,7 @@ try {
         Write-Output ''
         Write-Output ('Import-Certificate -FilePath "{0}" -CertStoreLocation Cert:\LocalMachine\TrustedPeople' -f $certPath)
         Write-Output ''
-        Write-Output 'この操作は、その PC で Waigoma 名義の署名を信頼することを意味します。'
+        Write-Output 'この操作は、その PC で waigoma 名義の署名を信頼することを意味します。'
         exit 1
     }
 

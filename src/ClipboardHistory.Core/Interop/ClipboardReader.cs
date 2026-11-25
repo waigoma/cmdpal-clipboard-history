@@ -8,7 +8,7 @@ namespace Waigoma.ClipboardHistory.Interop;
 // owner window that opens the clipboard belongs to that thread.
 public sealed class ClipboardReader
 {
-    private const string OwnMarker = "Waigoma.ClipboardHistory.Own";
+    private const string OwnMarker = "waigoma.ClipboardHistory.Own";
     private const string ExcludeMonitorMarker = "ExcludeClipboardContentFromMonitorProcessing";
     private const string ViewerIgnoreMarker = "Clipboard Viewer Ignore";
     private const string CanIncludeMarker = "CanIncludeInClipboardHistory";

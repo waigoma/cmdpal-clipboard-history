@@ -6,7 +6,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$packageName = 'Waigoma.CmdPal.ClipboardHistory'
+$packageName = 'waigoma.CmdPal.ClipboardHistory'
 
 try {
     $packages = @(Get-AppxPackage -Name $packageName -ErrorAction SilentlyContinue)

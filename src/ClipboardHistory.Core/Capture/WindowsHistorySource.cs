@@ -22,7 +22,7 @@ public sealed class WindowsHistorySource : IBackfillSource
     {
         "ExcludeClipboardContentFromMonitorProcessing",
         "Clipboard Viewer Ignore",
-        "Waigoma.ClipboardHistory.Own",
+        "waigoma.ClipboardHistory.Own",
     };
 
     private const string CanIncludeMarker = "CanIncludeInClipboardHistory";
@@ -46,7 +46,7 @@ public sealed class WindowsHistorySource : IBackfillSource
         })
         {
             IsBackground = true,
-            Name = "Waigoma.ClipboardHistory.HistoryRead",
+            Name = "waigoma.ClipboardHistory.HistoryRead",
         };
         thread.SetApartmentState(ApartmentState.STA);
         thread.Start();

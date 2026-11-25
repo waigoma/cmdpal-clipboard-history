@@ -12,8 +12,8 @@ namespace Waigoma.ClipboardHistory.Extension;
 // The only place that wires the core together. Everything the pages and commands need is reached through here.
 internal sealed partial class AppHost : IDisposable
 {
-    public const string RecorderMutexName = @"Local\Waigoma.ClipboardHistory.Recorder";
-    public const string WorkerMutexName = @"Local\Waigoma.ClipboardHistory.Worker";
+    public const string RecorderMutexName = @"Local\waigoma.ClipboardHistory.Recorder";
+    public const string WorkerMutexName = @"Local\waigoma.ClipboardHistory.Worker";
 
     private static readonly TimeSpan MaintenancePeriod = TimeSpan.FromMinutes(1);
     private static readonly TimeSpan MemoryTrimDelay = TimeSpan.FromSeconds(60);

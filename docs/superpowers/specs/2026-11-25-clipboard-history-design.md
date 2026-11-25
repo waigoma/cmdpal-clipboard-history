@@ -224,7 +224,7 @@ command-palett/
 
 - 開発中は開発者モードで `Add-AppxPackage -Register` を使う。常用版は自己署名証明書で署名した MSIX とする。
 - 開発者モードの切り替えと、証明書の `LocalMachine\TrustedPeople` への登録は、セキュリティ設定なので依頼者が行う。スクリプトは証明書の作成、署名、導入までとし、登録のコマンドは README に示す。
-- パッケージ名は `Waigoma.CmdPal.ClipboardHistory`、発行者は `CN=Waigoma` とする【提案】。
+- パッケージ名は `waigoma.CmdPal.ClipboardHistory`、発行者は `CN=waigoma` とする【提案】。
 - 秘密鍵は証明書ストアに置き、リポジトリに入れない。
 
 ## 10. 不確実点と試作

@@ -8,7 +8,7 @@ namespace Waigoma.ClipboardHistory.Capture;
 // Callbacks run on that thread, so they must return quickly and must not block on the thread itself.
 public sealed unsafe class ClipboardMonitor : IDisposable
 {
-    private const string WindowClassName = "Waigoma.ClipboardHistory.Monitor";
+    private const string WindowClassName = "waigoma.ClipboardHistory.Monitor";
     private const int StartTimeoutMs = 5000;
     private const int JoinTimeoutMs = 2000;
 

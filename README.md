@@ -29,10 +29,10 @@ PowerToys Command Palette (CmdPal) の拡張です。コピーした内容を履
 3. 署名証明書を信頼に登録します。これは管理者として開いた PowerShell で、利用者本人が 1 回だけ実行します。
 
    ```powershell
-   Import-Certificate -FilePath "C:\path\to\command-palett\artifacts\Waigoma.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPeople
+   Import-Certificate -FilePath "C:\path\to\command-palett\artifacts\waigoma.cer" -CertStoreLocation Cert:\LocalMachine\TrustedPeople
    ```
 
-   この操作は、その PC で `CN=Waigoma` が署名したパッケージを信頼することを意味します。信頼した証明書の秘密鍵は非公開のまま、`Cert:\CurrentUser\My` に残ります。
+   この操作は、その PC で `CN=waigoma` が署名したパッケージを信頼することを意味します。信頼した証明書の秘密鍵は非公開のまま、`Cert:\CurrentUser\My` に残ります。
    スクリプトは信頼の登録を自分では行いません。
 
 4. パッケージを導入します。
@@ -114,10 +114,10 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 
 ## 保存場所とプライバシー
 
-- 既定の保存先は、パッケージのローカルデータ (`LocalState\data`) です。場所は `%LOCALAPPDATA%\Packages\` の下にある `Waigoma.CmdPal.ClipboardHistory` で始まるフォルダーです。
+- 既定の保存先は、パッケージのローカルデータ (`LocalState\data`) です。場所は `%LOCALAPPDATA%\Packages\` の下にある `waigoma.CmdPal.ClipboardHistory` で始まるフォルダーです。
 - 履歴は暗号化せずに保存します。同じユーザーで動くほかのプログラムからも読めます。
 - 設定ファイルは `LocalState` に置き、保存先が変わっても失われないようにしています。
-- 動作のログは `%LOCALAPPDATA%\Packages\<パッケージのファミリー名>\LocalState\log.txt` に書きます。1 MB を超えると `log.1.txt` に移します。ファミリー名は `Waigoma.CmdPal.ClipboardHistory_` で始まります。起動に失敗したときは、一覧の「クリップボード履歴 (起動に失敗しました)」に例外の種類と HResult、ログの場所を表示します。
+- 動作のログは `%LOCALAPPDATA%\Packages\<パッケージのファミリー名>\LocalState\log.txt` に書きます。1 MB を超えると `log.1.txt` に移します。ファミリー名は `waigoma.CmdPal.ClipboardHistory_` で始まります。起動に失敗したときは、一覧の「クリップボード履歴 (起動に失敗しました)」に例外の種類と HResult、ログの場所を表示します。
 - 記録しないもの:
   - 除外アプリからのコピー
   - Windows の非記録指定 (`ExcludeClipboardContentFromMonitorProcessing`、`Clipboard Viewer Ignore`、`CanIncludeInClipboardHistory` が 0) が付いた内容
@@ -153,11 +153,11 @@ Alt+V は Raycast と重なるため、Raycast 側の Alt+V の割り当てを�
 .\scripts\uninstall.ps1 -Force
 ```
 
-証明書の信頼は次の手順で外せます。管理者として開いた PowerShell で、`Cert:\LocalMachine\TrustedPeople` から `CN=Waigoma` の証明書を削除します。署名に使った秘密鍵は `Cert:\CurrentUser\My` にあり、それも不要なら削除します。どちらも利用者が行います。
+証明書の信頼は次の手順で外せます。管理者として開いた PowerShell で、`Cert:\LocalMachine\TrustedPeople` から `CN=waigoma` の証明書を削除します。署名に使った秘密鍵は `Cert:\CurrentUser\My` にあり、それも不要なら削除します。どちらも利用者が行います。
 
 ```powershell
-Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Subject -eq 'CN=Waigoma' | Remove-Item
-Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -eq 'CN=Waigoma' | Remove-Item
+Get-ChildItem Cert:\LocalMachine\TrustedPeople | Where-Object Subject -ceq 'CN=waigoma' | Remove-Item
+Get-ChildItem Cert:\CurrentUser\My | Where-Object Subject -ceq 'CN=waigoma' | Remove-Item
 ```
 
 削除すると、既定の保存先の履歴 (`LocalState\data`) と設定も消えます。保存先を変更していた場合、その場所の履歴は消えません。取り出したい内容があれば、削除の前に確認してください。
@@ -173,7 +173,7 @@ dotnet test tests\ClipboardHistory.Core.Tests -c Debug
 
 - `build.ps1` は Release (x64、Native AOT) で拡張をビルドし、`artifacts\layout` にレイアウトを作ります。
 - `package.ps1` は `build.ps1` を実行したあと、`artifacts\ClipboardHistory_<version>_x64.msix` を作成して署名します。
-- `new-certificate.ps1` は `CN=Waigoma` の自己署名証明書を `Cert:\CurrentUser\My` に作ります。秘密鍵はエクスポートできません。公開部分だけを `artifacts\Waigoma.cer` に出します。
+- `new-certificate.ps1` は `CN=waigoma` の自己署名証明書を `Cert:\CurrentUser\My` に作ります。秘密鍵はエクスポートできません。公開部分だけを `artifacts\waigoma.cer` に出します。
 - `install.ps1` と `uninstall.ps1` の詳細は、それぞれの「導入」と「更新と削除」を参照してください。
 
 必要なもの: .NET SDK 10.0.300、Native AOT のビルドに必要な Visual Studio の構成 (`build.ps1` は Visual Studio Installer のツールを PATH に加えます)、署名に使う `signtool.exe` (`package.ps1` が NuGet の BuildTools か Windows SDK から探します)。

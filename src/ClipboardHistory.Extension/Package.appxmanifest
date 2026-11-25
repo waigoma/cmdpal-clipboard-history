@@ -9,13 +9,13 @@
   IgnorableNamespaces="uap uap3 rescap">
 
   <Identity
-    Name="Waigoma.CmdPal.ClipboardHistory"
-    Publisher="CN=Waigoma"
+    Name="waigoma.CmdPal.ClipboardHistory"
+    Publisher="CN=waigoma"
     Version="0.1.0.0" />
 
   <Properties>
     <DisplayName>クリップボード履歴</DisplayName>
-    <PublisherDisplayName>Waigoma</PublisherDisplayName>
+    <PublisherDisplayName>waigoma</PublisherDisplayName>
     <Logo>Assets\StoreLogo.png</Logo>
   </Properties>
 

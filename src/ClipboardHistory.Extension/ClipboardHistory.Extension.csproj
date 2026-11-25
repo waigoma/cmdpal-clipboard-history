@@ -76,6 +76,11 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
     </PackageReference>
+    <!-- Supplies makepri.exe and makeappx.exe so the MSIX tools come from NuGet, not the installed Windows Kits. -->
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools">
+      <PrivateAssets>all</PrivateAssets>
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers</IncludeAssets>
+    </PackageReference>
   </ItemGroup>
 
   <ItemGroup>

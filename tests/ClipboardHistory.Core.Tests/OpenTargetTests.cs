@@ -182,6 +182,26 @@ public sealed class OpenTargetTests : IDisposable
     [InlineData(@"\\?\C:\a.txt")]
     [InlineData(@"C:\a\b:c.txt")]
     [InlineData(@"C:\a""b.txt")]
+    [InlineData("relative.txt")]
+    [InlineData("C:")]
+    [InlineData("C:relative.txt")]
+    [InlineData("C:/a/b.txt")]
+    [InlineData(@"C:\a/b.txt")]
+    [InlineData(@"C:\a\..\b.txt")]
+    [InlineData(@"C:\a\.\b.txt")]
+    [InlineData(@"C:\a.\b.txt")]
+    [InlineData(@"C:\a \b.txt")]
+    [InlineData(@"C:\a\b\")]
+    [InlineData(@"C:\a%20b.txt")]
+    [InlineData(@"C:\a{b}.txt")]
+    [InlineData(@"C:\a*.txt")]
+    [InlineData(@"C:\a?.txt")]
+    [InlineData(@"C:\a<b.txt")]
+    [InlineData(@"C:\a>b.txt")]
+    [InlineData(@"C:\a|b.txt")]
+    [InlineData("C:\\a\nb.txt")]
+    [InlineData("C:\\a\u0001b.txt")]
+    [InlineData("C:\\a\u0000b.txt")]
     public void MalformedPaths_AreNotWellFormed(string path)
     {
         Assert.False(OpenTarget.IsWellFormedPath(path));
@@ -190,7 +210,7 @@ public sealed class OpenTargetTests : IDisposable
     [Theory]
     [InlineData(@"C:\a\b.txt")]
     [InlineData(@"D:\")]
-    [InlineData("relative.txt")]
+    [InlineData(@"c:\dir\file name.txt")]
     public void WellFormedPaths_AreAccepted(string path)
     {
         Assert.True(OpenTarget.IsWellFormedPath(path));

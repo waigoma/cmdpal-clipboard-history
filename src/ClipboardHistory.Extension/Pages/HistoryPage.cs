@@ -41,6 +41,9 @@ internal sealed partial class HistoryPage : DynamicListPage
 
     // Guarded by _gate. Holds only the rows of the last page, so a row the list no longer shows is not kept alive.
     private Dictionary<long, (EntrySummary Summary, ListItem Item)> _cache = new();
+
+    // Guarded by _gate. Bumped by every drop of the cache, so rows built before a drop are not stored after it.
+    private int _cacheVersion;
     private string _search = string.Empty;
     private string _lastFilter = HistoryFilters.All;
     private int _visible = PageSize;
@@ -132,10 +135,12 @@ internal sealed partial class HistoryPage : DynamicListPage
             bool hasMore = rows.Count > visible;
 
             Dictionary<long, (EntrySummary Summary, ListItem Item)> previous;
+            int cacheVersion;
             lock (_gate)
             {
                 _hasMore = hasMore;
                 previous = new Dictionary<long, (EntrySummary Summary, ListItem Item)>(_cache);
+                cacheVersion = _cacheVersion;
             }
 
             // A row is reused while its summary is unchanged, so the selection and its details survive a refresh.
@@ -170,9 +175,13 @@ internal sealed partial class HistoryPage : DynamicListPage
                 items.Add(item);
             }
 
+            // A drop that happened while the rows were being built means they may be stale, so they are not kept.
             lock (_gate)
             {
-                _cache = next;
+                if (!_closed && cacheVersion == _cacheVersion)
+                {
+                    _cache = next;
+                }
             }
 
             bool unfiltered = string.IsNullOrEmpty(search) && filter == HistoryFilters.All;
@@ -288,6 +297,7 @@ internal sealed partial class HistoryPage : DynamicListPage
 
                 _closed = true;
                 _cache = new();
+                _cacheVersion++;
             }
 
             _host.Store.Changed -= OnStoreChanged;
@@ -335,6 +345,7 @@ internal sealed partial class HistoryPage : DynamicListPage
                 if (!active)
                 {
                     _cache = new();
+                    _cacheVersion++;
                 }
                 else
                 {
@@ -369,6 +380,7 @@ internal sealed partial class HistoryPage : DynamicListPage
                 }
 
                 _cache = new();
+                _cacheVersion++;
                 active = Stopwatch.GetElapsedTime(_lastActive) <= ActiveWindow;
             }
 
@@ -402,6 +414,7 @@ internal sealed partial class HistoryPage : DynamicListPage
             lock (_gate)
             {
                 _cache = new();
+                _cacheVersion++;
             }
         }
         catch (Exception ex)

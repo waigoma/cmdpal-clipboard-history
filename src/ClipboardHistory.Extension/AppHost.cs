@@ -19,6 +19,9 @@ internal sealed partial class AppHost : IDisposable
     private static readonly TimeSpan MemoryTrimDelay = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan WorkerMaxRuntime = TimeSpan.FromMinutes(5);
 
+    // The most entries one sequential-paste session can walk. Older entries are not reached by the sequence.
+    private const int SequenceSnapshotLimit = 1000;
+
     // The worker's exit code is its processed count, and 255 is reserved for a fatal error, so anything else is a count.
     private const int FatalWorkerExitCode = 255;
 
@@ -67,6 +70,20 @@ internal sealed partial class AppHost : IDisposable
 
             // Paste waits for focus and key timing, so it runs on the thread pool, not on the caller's thread.
             Paste = new PasteService(Target, writer, new SystemDelay(), static action => Task.Run(action));
+
+            // The session's order is read once, capped so that a large history does not make the snapshot large.
+            SequentialRunner = new SequentialPasteRunner(
+                Sequence,
+                () => Store.IdsNewestFirst(SequenceSnapshotLimit),
+                Store.Exists,
+                Store.Get,
+                (entry, appendNewline) => SequentialPayload.Build(entry, appendNewline, Dib),
+                (payload, done) => Paste.Begin(payload, fromHotkey: true, outcome =>
+                {
+                    done(outcome);
+                    NoteSequenceDone(outcome);
+                }),
+                () => Settings.Current.SequenceNewline);
 
             Service = new HistoryService(
                 Store,
@@ -131,6 +148,8 @@ internal sealed partial class AppHost : IDisposable
     public PasteService Paste { get; }
 
     public SequentialPaste Sequence { get; }
+
+    public SequentialPasteRunner SequentialRunner { get; }
 
     public Func<HistoryOptions> Options { get; }
 
@@ -245,6 +264,25 @@ internal sealed partial class AppHost : IDisposable
         catch (Exception ex)
         {
             Log.Error("AppHost.OnForegroundChanged", ex);
+        }
+    }
+
+    // Runs on the paste's background thread once a sequential paste finishes. Sent and Busy are silent, as for the list.
+    private void NoteSequenceDone(PasteOutcome outcome)
+    {
+        try
+        {
+            if (outcome is PasteOutcome.Sent or PasteOutcome.Busy)
+            {
+                return;
+            }
+
+            Notice.Set(outcome);
+            RefreshRequested?.Invoke();
+        }
+        catch (Exception ex)
+        {
+            Log.Error("AppHost.NoteSequenceDone", ex);
         }
     }
 

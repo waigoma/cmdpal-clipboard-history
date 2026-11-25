@@ -84,17 +84,18 @@ public static class OpenTarget
             && !IsOpenableKind(first);
     }
 
-    // Rejects names the shell could read differently from how they were written: a drive is the only colon allowed,
-    // UNC and device prefixes are refused, quotes would break the explorer argument, and a trailing dot or space is
-    // stripped by Windows, so the name would not refer to the file that was checked.
+    // Accepts only a fully qualified drive path that is already in normal form, so the shell reads the same file that
+    // was checked. Relative paths, UNC and device prefixes, '.' and '..' segments, forward slashes and trailing
+    // separators are refused, because they can resolve to a different file than the text suggests. Windows strips a
+    // trailing dot or space from a name, and quotes and shell-special characters would change the explorer argument.
     internal static bool IsWellFormedPath(string path)
     {
-        if (string.IsNullOrEmpty(path) || path.Contains('"'))
+        if (string.IsNullOrEmpty(path) || path.Contains('"') || !IsDriveQualified(path))
         {
             return false;
         }
 
-        if (path.StartsWith(@"\\", StringComparison.Ordinal) || path.StartsWith("//", StringComparison.Ordinal))
+        if (path.IndexOfAny(ShellReservedPathChars) >= 0 || path.Any(char.IsControl))
         {
             return false;
         }
@@ -107,9 +108,42 @@ public static class OpenTarget
             }
         }
 
-        string name = Path.GetFileName(path);
-        return name.TrimEnd('.', ' ') == name;
+        // A trailing separator is meaningful only for a drive root; elsewhere it names a folder the caller did not check.
+        if (path.Length > DriveRootLength && path.EndsWith('\\'))
+        {
+            return false;
+        }
+
+        // Normalisation would change any path that still holds '..', '.', doubled or forward separators.
+        try
+        {
+            if (!string.Equals(Path.GetFullPath(path), path, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+
+        foreach (string segment in path[DriveRootLength..].Split('\\'))
+        {
+            if (segment.Length > 0 && segment.TrimEnd('.', ' ') != segment)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
+
+    private const int DriveRootLength = 3;
+
+    private static readonly char[] ShellReservedPathChars = ['%', '{', '}', '*', '?', '<', '>', '|'];
+
+    private static bool IsDriveQualified(string path) =>
+        path.Length >= DriveRootLength && char.IsAsciiLetter(path[0]) && path[1] == ':' && path[2] == '\\';
 
     private static bool IsOpenableKind(string path)
     {

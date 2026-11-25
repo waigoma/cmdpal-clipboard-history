@@ -6,8 +6,9 @@ using Waigoma.ClipboardHistory.Store;
 namespace Waigoma.ClipboardHistory;
 
 // Decides what each clipboard change becomes: stored, skipped, or a reset of the paste sequence. Clipboard callbacks,
-// timers and startup can run on different threads, so decisions that touch shared state run under one lock. The
-// worker is started outside that lock, because starting it must never wait on this service.
+// timers and startup can run on different threads, so the capture and backfill decisions run under _gate. The worker
+// is started outside that lock, because starting it must never wait on this service. Handlers of Store.Changed run
+// inside Upsert while _gate is held, so they must not block.
 public sealed class HistoryService : IDisposable
 {
     private const string MetaPaused = "paused";
@@ -25,8 +26,23 @@ public sealed class HistoryService : IDisposable
     private readonly Action _startWorker;
     private readonly SequentialPaste _sequence;
     private readonly TimeProvider _clock;
+
+    // Capture and backfill decisions only, so the getter of Paused never waits on them.
     private readonly Lock _gate = new();
-    private bool _paused;
+
+    // Serialises writes of the pause flag without involving _gate.
+    private readonly Lock _pauseGate = new();
+
+    // Guards _heartbeatMs, so the stored heartbeat is only ever raised and a stale write cannot lower it.
+    private readonly Lock _heartbeatGate = new();
+
+    private volatile bool _paused;
+
+    // The heartbeat read at construction is the backfill window. A capture before Startup must not move that window,
+    // or copies made while the app was closed would be hidden.
+    private readonly DateTimeOffset? _backfillSince;
+
+    private long? _heartbeatMs;
     private long _ticks;
 
     public HistoryService(HistoryStore store, Func<HistoryOptions> options, Func<ClipboardSnapshot?> read, IBackfillSource backfill,
@@ -40,23 +56,20 @@ public sealed class HistoryService : IDisposable
         _sequence = sequence;
         _clock = clock;
 
+        _backfillSince = ReadStoredHeartbeat();
+        _heartbeatMs = _backfillSince?.ToUnixTimeMilliseconds();
+
         // Pause is stored so that it survives a restart; a store that cannot answer leaves capture on.
         Guarded("HistoryService.Constructor.Paused", () => _paused = _store.GetMeta(MetaPaused) == "1");
     }
 
     public bool Paused
     {
-        get
-        {
-            lock (_gate)
-            {
-                return _paused;
-            }
-        }
+        get => _paused;
 
         set
         {
-            lock (_gate)
+            lock (_pauseGate)
             {
                 // Persisted before the field changes, so a failed write leaves the in-memory state unchanged.
                 if (_paused == value)
@@ -72,13 +85,17 @@ public sealed class HistoryService : IDisposable
 
     public void Startup()
     {
-        // Order matters: the heartbeat is written last, so the backfill still sees the time the app last ran.
+        // Order matters: the heartbeat is written last, so the backfill window is never moved past copies it still needs.
         Guarded("HistoryService.Startup.ResetRunning", () => _store.Jobs.ResetRunning());
         Guarded("HistoryService.Startup.Expire", ExpireRetained);
         Guarded("HistoryService.Startup.EnforceTotalLimit", TrimToTotalLimit);
         Guarded("HistoryService.Startup.Sweep", SweepUnreferencedFiles);
         Guarded("HistoryService.Startup.Backfill", Backfill);
-        Guarded("HistoryService.Startup.Heartbeat", WriteHeartbeat);
+
+        // The backfill can add old or large items, so retention and the total limit are applied once more.
+        Guarded("HistoryService.Startup.ExpireAfterBackfill", ExpireRetained);
+        Guarded("HistoryService.Startup.EnforceTotalLimitAfterBackfill", TrimToTotalLimit);
+        Guarded("HistoryService.Startup.Heartbeat", WriteHeartbeatNow);
         Guarded("HistoryService.Startup.Worker", () =>
         {
             if (_store.Jobs.HasPending())
@@ -118,7 +135,7 @@ public sealed class HistoryService : IDisposable
     // Called once a minute. Maintenance runs on every 60th call, so the first hour's work happens at minute 60.
     public void Tick()
     {
-        Guarded("HistoryService.Tick.Heartbeat", WriteHeartbeat);
+        Guarded("HistoryService.Tick.Heartbeat", WriteHeartbeatNow);
 
         if (Interlocked.Increment(ref _ticks) % MaintenanceEveryTicks != 0)
         {
@@ -133,7 +150,7 @@ public sealed class HistoryService : IDisposable
     // The store belongs to the caller, so disposing this service only records that the app was running.
     public void Dispose()
     {
-        Guarded("HistoryService.Dispose.Heartbeat", WriteHeartbeat);
+        Guarded("HistoryService.Dispose.Heartbeat", WriteHeartbeatNow);
     }
 
     // Runs under _gate. Returns true when a job is waiting, so the caller starts the worker after releasing the lock.
@@ -168,7 +185,7 @@ public sealed class HistoryService : IDisposable
 
         _store.Upsert(entry);
         _sequence.Reset();
-        WriteHeartbeat();
+        WriteHeartbeatFor(entry);
         Guarded("HistoryService.Capture.EnforceTotalLimit", TrimToTotalLimit);
         return PendingJobs();
     }
@@ -177,13 +194,7 @@ public sealed class HistoryService : IDisposable
     // current clipboard is recorded if it changed since the last sequence seen.
     private void Backfill()
     {
-        bool paused;
-        lock (_gate)
-        {
-            paused = _paused;
-        }
-
-        if (paused)
+        if (_paused)
         {
             // Pause means the user chose not to record, so only the sequence is updated, which keeps the
             // copy from being picked up after the user resumes.
@@ -208,25 +219,20 @@ public sealed class HistoryService : IDisposable
         }
     }
 
-    // The system history is only trusted when the heartbeat exists and nothing is excluded. Without a heartbeat
-    // the app has never run here, so old history could flood the list. Excluded apps need filtering the system
-    // history cannot provide, so it is not read at all.
+    // The system history is only trusted when a heartbeat existed at construction and nothing is excluded. Without a
+    // heartbeat the app has never run here, so old history could flood the list. Excluded apps need filtering the
+    // system history cannot provide, so it is not read at all.
     private IReadOnlyList<BackfillItem> ReadWindowsHistory(HistoryOptions options)
     {
+        DateTimeOffset? window = _backfillSince;
+        if (window is null || options.ExcludedApps.Count > 0)
+        {
+            return Array.Empty<BackfillItem>();
+        }
+
         try
         {
-            string? heartbeat = _store.GetMeta(MetaHeartbeat);
-            if (heartbeat is null || options.ExcludedApps.Count > 0)
-            {
-                return Array.Empty<BackfillItem>();
-            }
-
-            if (!long.TryParse(heartbeat, NumberStyles.Integer, CultureInfo.InvariantCulture, out long heartbeatMs))
-            {
-                return Array.Empty<BackfillItem>();
-            }
-
-            DateTimeOffset since = DateTimeOffset.FromUnixTimeMilliseconds(heartbeatMs);
+            DateTimeOffset since = window.Value;
 
             // The source is asked to filter, but filtering again here means a lax source cannot revive old items.
             return _backfill.ReadNewerThan(since)
@@ -255,6 +261,7 @@ public sealed class HistoryService : IDisposable
                 if (entry is not null)
                 {
                     _store.Upsert(entry);
+                    WriteHeartbeatFor(entry);
                 }
             }
             catch (Exception ex)
@@ -274,13 +281,15 @@ public sealed class HistoryService : IDisposable
         }
 
         string sequence = SequenceText(snapshot.Sequence);
-        if (_store.GetMeta(MetaLastSequence) != sequence && !CaptureFilter.ShouldIgnore(snapshot, options.ExcludedApps))
+        if (_store.GetMeta(MetaLastSequence) != sequence
+            && !snapshot.IsOwnWrite
+            && !CaptureFilter.ShouldIgnore(snapshot, options.ExcludedApps))
         {
             CapturedEntry? entry = CaptureBuilder.Build(snapshot, options, _clock.GetUtcNow());
             if (entry is not null)
             {
                 _store.Upsert(entry);
-                WriteHeartbeat();
+                WriteHeartbeatFor(entry);
             }
         }
 
@@ -315,9 +324,47 @@ public sealed class HistoryService : IDisposable
         _store.SweepFiles(SweepMinAge);
     }
 
-    private void WriteHeartbeat()
+    private DateTimeOffset? ReadStoredHeartbeat()
     {
-        _store.SetMeta(MetaHeartbeat, _clock.GetUtcNow().ToUnixTimeMilliseconds().ToString(CultureInfo.InvariantCulture));
+        try
+        {
+            string? text = _store.GetMeta(MetaHeartbeat);
+            return long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out long ms)
+                ? DateTimeOffset.FromUnixTimeMilliseconds(ms)
+                : null;
+        }
+        catch (Exception ex)
+        {
+            Log.Error("HistoryService.Constructor.Heartbeat", ex);
+            return null;
+        }
+    }
+
+    private void WriteHeartbeatNow() => WriteHeartbeat(_clock.GetUtcNow());
+
+    // An entry copied later than now (a backfilled item) still needs the heartbeat to cover it, so the window
+    // of the next start does not start after the entry and let it come back as a new copy.
+    private void WriteHeartbeatFor(CapturedEntry entry)
+    {
+        DateTimeOffset now = _clock.GetUtcNow();
+        WriteHeartbeat(entry.CopiedAt > now ? entry.CopiedAt : now);
+    }
+
+    // The heartbeat only ever moves forward. A clock that steps back must not lower the window, and an older write
+    // that arrives late must not overwrite a newer one.
+    private void WriteHeartbeat(DateTimeOffset at)
+    {
+        lock (_heartbeatGate)
+        {
+            long ms = at.ToUnixTimeMilliseconds();
+            if (_heartbeatMs is { } stored && stored > ms)
+            {
+                ms = stored;
+            }
+
+            _store.SetMeta(MetaHeartbeat, ms.ToString(CultureInfo.InvariantCulture));
+            _heartbeatMs = ms;
+        }
     }
 
     private bool PendingJobs()

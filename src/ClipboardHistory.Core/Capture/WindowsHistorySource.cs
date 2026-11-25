@@ -2,6 +2,7 @@ using System.Runtime.InteropServices.WindowsRuntime;
 using Windows.ApplicationModel.DataTransfer;
 using Windows.Foundation;
 using Windows.Storage;
+using Windows.Storage.Streams;
 
 namespace Waigoma.ClipboardHistory.Capture;
 
@@ -14,6 +15,17 @@ public sealed class WindowsHistorySource : IBackfillSource
 
     // Each WinRT await is bounded separately, so one stuck call cannot hold the STA thread past the overall timeout.
     private static readonly TimeSpan AwaitTimeout = TimeSpan.FromSeconds(5);
+
+    // Markers that a copy source sets to keep its content out of clipboard monitors and history. Names are matched
+    // case-insensitively, because the formats are registered by name and their casing is not guaranteed.
+    private static readonly HashSet<string> BlockingMarkers = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ExcludeClipboardContentFromMonitorProcessing",
+        "Clipboard Viewer Ignore",
+        "Waigoma.ClipboardHistory.Own",
+    };
+
+    private const string CanIncludeMarker = "CanIncludeInClipboardHistory";
 
     public IReadOnlyList<BackfillItem> ReadNewerThan(DateTimeOffset since)
     {
@@ -68,6 +80,12 @@ public sealed class WindowsHistorySource : IBackfillSource
                 }
 
                 DataPackageView content = entry.Content;
+                if (HasBlockingMarker(content.AvailableFormats, out bool needsCanIncludeCheck)
+                    || (needsCanIncludeCheck && !CanIncludeAllowed(content)))
+                {
+                    continue;
+                }
+
                 string? text = null;
                 IReadOnlyList<string>? files = null;
                 if (content.Contains(StandardDataFormats.Text))
@@ -121,6 +139,53 @@ public sealed class WindowsHistorySource : IBackfillSource
         }
 
         return paths;
+    }
+
+    // Pure so that the name decision can be tested without a clipboard. The CanInclude value is not checked here,
+    // because reading it needs WinRT; the caller does that when needsCanIncludeCheck is set.
+    internal static bool HasBlockingMarker(IEnumerable<string> formats, out bool needsCanIncludeCheck)
+    {
+        bool blocked = false;
+        needsCanIncludeCheck = false;
+        foreach (string format in formats)
+        {
+            if (string.Equals(format, CanIncludeMarker, StringComparison.OrdinalIgnoreCase))
+            {
+                needsCanIncludeCheck = true;
+            }
+            else if (BlockingMarkers.Contains(format))
+            {
+                blocked = true;
+            }
+        }
+
+        return blocked;
+    }
+
+    // The marker holds a 32-bit value that is nonzero when the source allows history. Any failure to read it means
+    // the source cannot be trusted, so the item is skipped.
+    private static bool CanIncludeAllowed(DataPackageView content)
+    {
+        try
+        {
+            if (Await(content.GetDataAsync(CanIncludeMarker)) is not IRandomAccessStream stream)
+            {
+                return false;
+            }
+
+            using (stream)
+            using (Stream bytes = stream.AsStreamForRead())
+            {
+                byte[] buffer = new byte[4];
+                bytes.ReadExactly(buffer);
+                return BitConverter.ToInt32(buffer) != 0;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error("WindowsHistorySource.CanInclude", ex);
+            return false;
+        }
     }
 
     // A timed-out await yields null, which the callers treat as "nothing to read".

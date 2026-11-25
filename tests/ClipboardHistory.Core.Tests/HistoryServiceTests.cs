@@ -343,6 +343,183 @@ public sealed class HistoryServiceTests
         Assert.Null(f.Store.GetMeta("paused"));
     }
 
+    [Fact]
+    public void Heartbeat_NeverGoesBackwards_StaleWriteDoesNotLowerStoredValue()
+    {
+        using var f = new ServiceFixture();
+        using HistoryService service = f.Create();
+        f.Clock.UtcNow = T0 + TimeSpan.FromMinutes(10);
+        service.Tick();
+
+        f.Clock.UtcNow = T0;
+        service.Tick();
+
+        Assert.Equal(Heartbeat(T0 + TimeSpan.FromMinutes(10)), f.Store.GetMeta("heartbeat"));
+    }
+
+    [Fact]
+    public void ClockStepsBack_DeletedItem_DoesNotReturnAfterRestart()
+    {
+        using var f = new ServiceFixture();
+        f.Current = TextCopy(5, "secret note");
+        using (HistoryService first = f.Create())
+        {
+            first.OnClipboardChanged();
+            long id = f.Store.Query(new HistoryQuery(string.Empty, null, 0, 100)).Single().Id;
+            f.Store.Delete(id);
+            f.Clock.UtcNow = T0 - TimeSpan.FromHours(1);
+            first.Tick();
+        }
+
+        f.Backfill.Items.Add(new BackfillItem("secret note", null, T0));
+        using HistoryService restarted = f.Create();
+        restarted.Startup();
+
+        Assert.Equal(0, f.Rows());
+    }
+
+    [Fact]
+    public void Startup_UsesHeartbeatReadAtConstruction_SoEarlierCaptureDoesNotHideOfflineCopies()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromMinutes(10)));
+        using HistoryService service = f.Create();
+        f.Current = TextCopy(5, "captured before startup");
+        service.OnClipboardChanged();
+        f.Current = null;
+        f.Backfill.Items.Add(new BackfillItem("offline copy", null, T0 - TimeSpan.FromMinutes(5)));
+
+        service.Startup();
+
+        string[] previews = f.Store.Query(new HistoryQuery(string.Empty, null, 0, 100)).Select(r => r.Preview).ToArray();
+        Assert.Contains("offline copy", previews);
+    }
+
+    [Fact]
+    public void Backfill_UpsertRaisesHeartbeatToCopiedAt()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromHours(1)));
+        f.Backfill.Items.Add(new BackfillItem("later copy", null, T0 + TimeSpan.FromMinutes(30)));
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        long stored = long.Parse(f.Store.GetMeta("heartbeat")!, CultureInfo.InvariantCulture);
+        Assert.True(stored >= (T0 + TimeSpan.FromMinutes(30)).ToUnixTimeMilliseconds());
+    }
+
+    [Fact]
+    public void Startup_ExpiresAgain_AfterBackfillAddsOldItems()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromDays(200)));
+        f.Backfill.Items.Add(new BackfillItem("old copy", null, T0 - TimeSpan.FromDays(100)));
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        Assert.Equal(0, f.Rows());
+    }
+
+    [Fact]
+    public void Startup_EnforcesTotalLimitAgain_AfterBackfillAddsEntries()
+    {
+        using var f = new ServiceFixture();
+        f.Options = f.Options with { MaxTotalBytes = 10 };
+        f.Store.Upsert(new CapturedEntry(EntryKind.Text, "aaaa", Array.Empty<ClipFormat>(),
+            ContentHasher.ForText("aaaa"), null, T0));
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromHours(1)));
+        f.Backfill.Items.Add(new BackfillItem("bbbbbbbbb", null, T0 + TimeSpan.FromMinutes(1)));
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        EntrySummary row = Assert.Single(f.Store.Query(new HistoryQuery(string.Empty, null, 0, 100)));
+        Assert.Equal("bbbbbbbbb", row.Preview);
+    }
+
+    [Fact]
+    public void Startup_WithPendingImageJob_StartsWorker()
+    {
+        using var f = new ServiceFixture();
+        byte[] png = { 1, 2, 3, 4 };
+        f.Store.Upsert(new CapturedEntry(EntryKind.Image, null, new[] { new ClipFormat(FormatNames.Png, png) },
+            ContentHasher.ForBytes(png), null, T0));
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        Assert.Equal(1, f.WorkerStarts);
+    }
+
+    [Fact]
+    public void Startup_CurrentClipboardWithExcludeMarker_IsNotStored()
+    {
+        using var f = new ServiceFixture();
+        f.Current = new ClipboardSnapshot(5, null, false, true, false, null, "marked secret", null, Array.Empty<ClipFormat>());
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        Assert.Equal(0, f.Rows());
+    }
+
+    [Fact]
+    public void Startup_CurrentClipboardFromExcludedApp_IsNotStored()
+    {
+        using var f = new ServiceFixture();
+        f.Options = f.Options with { ExcludedApps = new HashSet<string>(StringComparer.Ordinal) { "keepass.exe" } };
+        f.Current = TextCopy(5, "from keepass", @"C:\Apps\KeePass.exe");
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        Assert.Equal(0, f.Rows());
+    }
+
+    [Fact]
+    public void Startup_CurrentOwnWrite_IsNotStored_ButSequenceIsStored()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("last_sequence", "4");
+        f.Current = OwnWrite(5, "echo of our paste");
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        Assert.Equal(0, f.Rows());
+        Assert.Equal("5", f.Store.GetMeta("last_sequence"));
+    }
+
+    [Fact]
+    public void Dispose_WritesHeartbeat()
+    {
+        using var f = new ServiceFixture();
+        f.Clock.UtcNow = T0 + TimeSpan.FromMinutes(5);
+
+        using (HistoryService service = f.Create())
+        {
+        }
+
+        Assert.Equal(Heartbeat(T0 + TimeSpan.FromMinutes(5)), f.Store.GetMeta("heartbeat"));
+    }
+
+    [Fact]
+    public void Backfill_FilesOnlyItem_IsRecordedAsFiles()
+    {
+        using var f = new ServiceFixture();
+        f.Store.SetMeta("heartbeat", Heartbeat(T0 - TimeSpan.FromHours(1)));
+        f.Backfill.Items.Add(new BackfillItem(null, new[] { @"C:\data\note.txt" }, T0 - TimeSpan.FromMinutes(10)));
+        using HistoryService service = f.Create();
+
+        service.Startup();
+
+        EntrySummary row = Assert.Single(f.Store.Query(new HistoryQuery(string.Empty, null, 0, 100)));
+        Assert.Equal(EntryKind.Files, row.Kind);
+        Assert.Equal("note.txt", row.Preview);
+    }
+
     private static ClipboardSnapshot TextCopy(uint sequence, string text, string? exe = null) =>
         new(sequence, exe, false, false, false, null, text, null, Array.Empty<ClipFormat>());
 
